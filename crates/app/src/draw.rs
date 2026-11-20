@@ -3,7 +3,9 @@
 
 use ale_config::{Palette, Rgb};
 use ale_core::TermState;
+use ale_core::image::ImageCell;
 use ale_core::vt::grid::Dimensions;
+use ale_core::vt::index::Point;
 use ale_core::vt::term::cell::Flags;
 use ale_core::vt::term::color::Colors;
 use ale_core::vt::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
@@ -24,6 +26,13 @@ pub struct PaneStyle<'a> {
     /// Whether this pane receives keyboard input (solid cursor) or not
     /// (hollow cursor).
     pub focused: bool,
+    /// A link under the mouse to underline: first and last cell, inclusive.
+    pub link: Option<(Point, Point)>,
+    /// Shape runs of punctuation together so the font can form ligatures.
+    pub ligatures: bool,
+    /// Added to an image's id to form its key in the renderer, so images
+    /// from different panes never collide.
+    pub image_key_base: u64,
 }
 
 /// Resolves a terminal color to RGB. Colors a program redefined at runtime
@@ -110,6 +119,7 @@ pub fn pane(r: &mut Renderer, term: &TermState, rect: Rect, style: &PaneStyle) {
     // Pass 1: backgrounds. Neighbouring cells with the same background are
     // merged into one rectangle to keep the instance count down.
     let mut run: Option<(i32, usize, usize, Rgb)> = None; // row, first col, end col, color
+    let mut images: Vec<ImageRun> = Vec::new();
     let flush = |r: &mut Renderer, run: &mut Option<(i32, usize, usize, Rgb)>| {
         if let Some((row, start, end, bg)) = run.take() {
             let x = origin_x + start as f32 * cw;
@@ -121,6 +131,13 @@ pub fn pane(r: &mut Renderer, term: &TermState, rect: Rect, style: &PaneStyle) {
         let col = cell.point.column.0;
         if row == cursor_row && col == cursor_col && cell.flags.contains(Flags::WIDE_CHAR) {
             cursor_cells = 2.0;
+        }
+        // Cells tagged as part of an image: gather each row's run of cells.
+        if let Some(image_cell) = cell.hyperlink().and_then(|link| ImageCell::decode(link.uri())) {
+            match images.last_mut() {
+                Some(last) if last.cell == image_cell && last.row == row && last.end == col => last.end = col + 1,
+                _ => images.push(ImageRun { cell: image_cell, row, start: col, end: col + 1 }),
+            }
         }
         let selected = selection.is_some_and(|s| s.contains(cell.point));
         let (_, bg) = cell_colors(cell.fg, cell.bg, cell.flags, selected, overrides, palette);
@@ -137,6 +154,30 @@ pub fn pane(r: &mut Renderer, term: &TermState, rect: Rect, style: &PaneStyle) {
         }
     }
     flush(r, &mut run);
+
+    // Images go over the backgrounds and under the cursor and text. Each
+    // run of tagged cells shows one horizontal strip of its image.
+    for image in &images {
+        let ImageCell { id, row: image_row, width_cells, height_cells } = image.cell;
+        if width_cells <= 0.0 || height_cells <= 0.0 {
+            continue;
+        }
+        // The strip is one cell tall, except the last one, which may be
+        // shorter; likewise the run may be wider than what is left to show.
+        let strip_cells = (height_cells - image_row as f32).min(1.0);
+        let shown_cells = ((image.end - image.start) as f32).min(width_cells);
+        if strip_cells <= 0.0 {
+            continue;
+        }
+        r.image(
+            style.image_key_base + id as u64,
+            origin_x + image.start as f32 * cw,
+            origin_y + image.row as f32 * ch,
+            (shown_cells * cw).round(),
+            (strip_cells * ch).round(),
+            [0.0, image_row as f32 / height_cells, shown_cells / width_cells, strip_cells / height_cells],
+        );
+    }
 
     // The cursor sits between backgrounds and text so a block cursor can
     // show the character under it.
@@ -163,6 +204,7 @@ pub fn pane(r: &mut Renderer, term: &TermState, rect: Rect, style: &PaneStyle) {
     // Pass 2: text and decorations.
     let content = term.renderable_content();
     let mut cluster = String::new();
+    let mut run = LigatureRun::default();
     for cell in content.display_iter {
         let flags = cell.flags;
         if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN) {
@@ -183,18 +225,31 @@ pub fn pane(r: &mut Renderer, term: &TermState, rect: Rect, style: &PaneStyle) {
         if flags.intersects(Flags::ALL_UNDERLINES) {
             r.rect(x, y + (baseline + thin * 2.0).min(ch - thin), width, thin, fg);
         }
+        if style.link.is_some_and(|(start, end)| start <= cell.point && cell.point <= end) {
+            r.rect(x, y + (baseline + thin * 2.0).min(ch - thin), width, thin, color(palette.accent));
+        }
         if flags.contains(Flags::STRIKEOUT) {
             r.rect(x, y + (baseline * 0.68).round(), width, thin, fg);
         }
 
         let c = cell.c;
+        let (bold, italic) = (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC));
+        // Punctuation is collected into runs and drawn when the run ends.
+        if style.ligatures && is_ligature_char(c) && cell.zerowidth().is_none() {
+            if !run.extends(row, col, fg, bold, italic) {
+                run.flush(r);
+                run.start(row, x, y, fg, bold, italic);
+            }
+            run.push(c, col);
+            continue;
+        }
+        run.flush(r);
         if c == ' ' || c == '\0' {
             continue;
         }
         if boxdraw::draw(r, c, x, y, cw, ch, fg) {
             continue;
         }
-        let (bold, italic) = (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC));
         match cell.zerowidth() {
             // A base character followed by combining marks.
             Some(marks) => {
@@ -209,4 +264,70 @@ pub fn pane(r: &mut Renderer, term: &TermState, rect: Rect, style: &PaneStyle) {
             }
         }
     }
+    run.flush(r);
+}
+
+/// Characters that programming fonts combine into ligatures (`->`, `!=`,
+/// `>=`, `::`, ...).
+fn is_ligature_char(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '#' | '$' | '%' | '&' | '*' | '+' | '-' | '.' | '/' | ':' | ';' | '<' | '=' | '>' | '?'
+            | '@' | '\\' | '^' | '|' | '~' | '_'
+    )
+}
+
+/// Neighbouring punctuation cells with the same style, drawn as one piece
+/// of text so the font can substitute a ligature.
+#[derive(Default)]
+struct LigatureRun {
+    text: String,
+    row: i32,
+    /// Column after the last character in the run.
+    next_col: usize,
+    x: f32,
+    y: f32,
+    color: Color,
+    bold: bool,
+    italic: bool,
+}
+
+impl LigatureRun {
+    /// Longest run shaped at once. Long rules such as `--------` are split
+    /// so they reuse a few cached pieces instead of one entry per length.
+    const MAX: usize = 8;
+
+    fn extends(&self, row: i32, col: usize, color: Color, bold: bool, italic: bool) -> bool {
+        !self.text.is_empty()
+            && self.text.len() < Self::MAX
+            && (self.row, self.next_col) == (row, col)
+            && (self.color, self.bold, self.italic) == (color, bold, italic)
+    }
+
+    fn start(&mut self, row: i32, x: f32, y: f32, color: Color, bold: bool, italic: bool) {
+        (self.row, self.x, self.y) = (row, x, y);
+        (self.color, self.bold, self.italic) = (color, bold, italic);
+    }
+
+    fn push(&mut self, c: char, col: usize) {
+        self.text.push(c);
+        self.next_col = col + 1;
+    }
+
+    fn flush(&mut self, r: &mut Renderer) {
+        if !self.text.is_empty() {
+            r.cell(&self.text, self.bold, self.italic, self.x, self.y, self.color);
+            self.text.clear();
+        }
+    }
+}
+
+/// Cells on one screen row that show the same row of the same image.
+struct ImageRun {
+    cell: ImageCell,
+    /// Screen row.
+    row: i32,
+    /// First column and the column after the last.
+    start: usize,
+    end: usize,
 }

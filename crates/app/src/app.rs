@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 
 use ale_config::{Config, Palette};
 use ale_core::vt::grid::Scroll;
-use ale_core::vt::index::{Column, Point, Side};
+use ale_core::vt::grid::Dimensions;
+use ale_core::vt::index::{Boundary, Column, Direction as SearchDirection, Line, Point, Side};
+use ale_core::vt::term::cell::Flags;
+use ale_core::vt::term::search::RegexSearch;
 use ale_core::vt::selection::{Selection, SelectionType};
 use ale_core::vt::term::{self, TermMode};
 use ale_core::vt::vte::ansi::{Color as AnsiColor, NamedColor, Rgb as AnsiRgb};
@@ -23,11 +26,14 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Theme, Window, WindowId};
 
 use crate::Options;
+use crate::actions::{self, Action};
+use crate::links::{self, Target};
+use crate::overlay::{self, Overlay, PaletteLayout};
 use crate::chrome::{TabBar, TabBarHit};
 use crate::draw::{self, PaneStyle, color};
 use crate::input::{self, MouseAction, button};
@@ -43,6 +49,9 @@ struct Pane {
     terminal: Terminal,
     /// Title set by the program (via escape sequence), if any.
     title: Option<String>,
+    /// When that title was set, to tell a title set by the running program
+    /// from a stale one left by the shell.
+    title_set: Instant,
     /// Shown when the program set no title: the working folder's name.
     fallback_title: String,
     fallback_checked: Instant,
@@ -78,6 +87,15 @@ struct Mouse {
     last_cell: Option<(PaneId, usize, usize)>,
 }
 
+/// A link under the mouse while Cmd is held.
+struct HoverLink {
+    pane: PaneId,
+    /// First and last cell of the link, inclusive.
+    start: Point,
+    end: Point,
+    target: Target,
+}
+
 pub struct App {
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -97,6 +115,12 @@ pub struct App {
 
     modifiers: ModifiersState,
     mouse: Mouse,
+    overlay: Overlay,
+    /// The last search text, so Find Next works after the bar is closed.
+    last_search: String,
+    hover_link: Option<HoverLink>,
+    /// Folder with the shell integration script, when enabled and installed.
+    integration: Option<PathBuf>,
     snapshot_at: Option<Instant>,
     /// When the process started, to report time to first frame.
     launched: Instant,
@@ -132,6 +156,10 @@ impl App {
                 click_count: 0,
                 last_cell: None,
             },
+            overlay: Overlay::None,
+            last_search: String::new(),
+            hover_link: None,
+            integration: None,
             snapshot_at: None,
             launched: Instant::now(),
             first_frame_logged: false,
@@ -264,12 +292,15 @@ impl App {
                 .or_else(|| std::env::var_os("HOME").map(PathBuf::from)),
             scrollback: terminal.scrollback,
             size: self.grid_size(rect),
+            integration: self.integration.clone().filter(|_| terminal.shell_integration),
+            env: Vec::new(),
         };
         match Terminal::spawn(id, options, callback) {
             Ok(terminal) => {
                 let pane = Pane {
                     terminal,
                     title: None,
+                    title_set: Instant::now(),
                     fallback_title: "shell".into(),
                     // Already "expired", so the first draw looks up the folder.
                     fallback_checked: Instant::now() - Duration::from_secs(60),
@@ -320,6 +351,9 @@ impl App {
     /// true when no tabs are left and the app should quit.
     fn close_pane(&mut self, id: PaneId) -> bool {
         self.panes.remove(&id);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.retain_images(|key| key >> 32 != id);
+        }
         let Some(index) = self.tabs.iter().position(|tab| tab.root.panes().contains(&id)) else {
             return self.tabs.is_empty();
         };
@@ -448,82 +482,45 @@ impl App {
 
     // ---- Keyboard ---------------------------------------------------------
 
-    /// Handles app shortcuts. Returns true when the key was consumed.
-    fn shortcut(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
-        let mods = self.modifiers;
-        let (cmd, shift, alt, ctrl) =
-            (mods.super_key(), mods.shift_key(), mods.alt_key(), mods.control_key());
-
-        // Ctrl+Tab and Ctrl+Shift+Tab switch tabs.
-        if ctrl && !cmd && event.logical_key == Key::Named(NamedKey::Tab) {
-            self.cycle_tab(if shift { -1 } else { 1 });
-            return true;
-        }
-        // Shift+PageUp/PageDown scroll the history by a page.
-        if shift && !cmd && !ctrl && !alt {
-            let scroll = match event.logical_key {
-                Key::Named(NamedKey::PageUp) => Some(Scroll::PageUp),
-                Key::Named(NamedKey::PageDown) => Some(Scroll::PageDown),
-                _ => None,
-            };
-            if let (Some(scroll), Some(pane)) = (scroll, self.focused_pane()) {
-                pane.terminal.lock().scroll_display(scroll);
-                self.redraw();
-                return true;
-            }
-        }
-        if !cmd {
-            return false;
-        }
-
-        // Cmd+Option+arrows move focus between panes.
-        if alt {
-            let direction = match event.logical_key {
-                Key::Named(NamedKey::ArrowLeft) => Some(Direction::Left),
-                Key::Named(NamedKey::ArrowRight) => Some(Direction::Right),
-                Key::Named(NamedKey::ArrowUp) => Some(Direction::Up),
-                Key::Named(NamedKey::ArrowDown) => Some(Direction::Down),
-                _ => None,
-            };
-            if let Some(direction) = direction {
-                self.focus_direction(direction);
-                return true;
-            }
-        }
-        // Brackets are matched by position so they work on every layout.
-        match event.physical_key {
-            PhysicalKey::Code(KeyCode::BracketLeft) => {
-                if shift { self.cycle_tab(-1) } else { self.cycle_pane(-1) }
-                return true;
-            }
-            PhysicalKey::Code(KeyCode::BracketRight) => {
-                if shift { self.cycle_tab(1) } else { self.cycle_pane(1) }
-                return true;
-            }
-            _ => {}
-        }
-
-        let key = event.key_without_modifiers();
-        let Key::Character(text) = &key else { return false };
-        match text.as_str() {
-            "t" => self.new_tab(None),
-            "w" => {
+    /// Runs a command, whether it came from a shortcut or the palette.
+    fn perform(&mut self, action: Action, event_loop: &ActiveEventLoop) {
+        match action {
+            Action::NewTab => self.new_tab(None),
+            Action::ClosePane => {
                 if let Some(id) = self.focused_pane_id()
                     && self.close_pane(id)
                 {
                     event_loop.exit();
                 }
             }
-            "d" => self.split(if shift { Axis::Vertical } else { Axis::Horizontal }),
-            "c" => self.copy(),
-            "v" => self.paste(),
-            "k" => self.clear_history(),
-            "q" => event_loop.exit(),
-            "=" | "+" => self.set_zoom(self.zoom * 1.1),
-            "-" => self.set_zoom(self.zoom / 1.1),
-            "0" => self.set_zoom(1.0),
-            "," => open_config_file(),
-            "f" if ctrl => {
+            Action::SplitRight => self.split(Axis::Horizontal),
+            Action::SplitDown => self.split(Axis::Vertical),
+            Action::NextTab => self.cycle_tab(1),
+            Action::PreviousTab => self.cycle_tab(-1),
+            Action::SelectTab(index) => {
+                // Cmd+9 always goes to the last tab.
+                let last = self.tabs.len().saturating_sub(1);
+                self.select_tab(if index == 8 { last } else { (index as usize).min(last) });
+            }
+            Action::NextPane => self.cycle_pane(1),
+            Action::PreviousPane => self.cycle_pane(-1),
+            Action::FocusPane(direction) => self.focus_direction(direction),
+            Action::Copy => self.copy(),
+            Action::Paste => self.paste(),
+            Action::Find => self.open_search(),
+            Action::FindNext => self.search_step(SearchDirection::Right, true),
+            Action::FindPrevious => self.search_step(SearchDirection::Left, true),
+            Action::PreviousPrompt => self.jump_to_prompt(true),
+            Action::NextPrompt => self.jump_to_prompt(false),
+            Action::ScrollPageUp => self.scroll(Scroll::PageUp),
+            Action::ScrollPageDown => self.scroll(Scroll::PageDown),
+            Action::ScrollToTop => self.scroll(Scroll::Top),
+            Action::ScrollToBottom => self.scroll(Scroll::Bottom),
+            Action::ClearHistory => self.clear_history(),
+            Action::ZoomIn => self.set_zoom(self.zoom * 1.1),
+            Action::ZoomOut => self.set_zoom(self.zoom / 1.1),
+            Action::ZoomReset => self.set_zoom(1.0),
+            Action::ToggleFullscreen => {
                 if let Some(window) = &self.window {
                     let fullscreen = window.fullscreen().is_some();
                     window.set_fullscreen(
@@ -531,23 +528,33 @@ impl App {
                     );
                 }
             }
-            digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
-                let index = digit.parse::<usize>().unwrap_or(1) - 1;
-                // Cmd+9 always goes to the last tab.
-                let last = self.tabs.len().saturating_sub(1);
-                self.select_tab(if index == 8 { last } else { index.min(last) });
+            Action::CommandPalette => {
+                self.overlay = Overlay::Palette { query: String::new(), selected: 0 };
+                self.redraw();
             }
-            _ => return false,
+            Action::OpenConfig => open_config_file(),
+            Action::Quit => event_loop.exit(),
         }
-        true
+    }
+
+    fn scroll(&mut self, scroll: Scroll) {
+        if let Some(pane) = self.focused_pane() {
+            pane.terminal.lock().scroll_display(scroll);
+            self.redraw();
+        }
     }
 
     fn key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
         if event.state != ElementState::Pressed {
             return;
         }
-        if self.shortcut(event, event_loop) {
-            return;
+        let action =
+            actions::from_key(&event.key_without_modifiers(), event.physical_key, self.modifiers);
+        if self.overlay.is_open() {
+            return self.overlay_key(event, action, event_loop);
+        }
+        if let Some(action) = action {
+            return self.perform(action, event_loop);
         }
         let Some(pane) = self.focused_pane() else { return };
         let mode = *pane.terminal.lock().mode();
@@ -566,6 +573,205 @@ impl App {
         if let Some(bytes) = bytes {
             self.send_input(bytes);
         }
+    }
+
+    // ---- Overlays: command palette and search -----------------------------
+
+    /// Keyboard handling while the palette or search bar is open: keys edit
+    /// the query instead of going to the shell.
+    fn overlay_key(&mut self, event: &KeyEvent, action: Option<Action>, event_loop: &ActiveEventLoop) {
+        let shift = self.modifiers.shift_key();
+        let command = self.modifiers.super_key() || self.modifiers.control_key();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => return self.close_overlay(),
+            Key::Named(NamedKey::Enter) => return self.overlay_confirm(shift, event_loop),
+            Key::Named(NamedKey::ArrowUp) => return self.overlay_move(-1),
+            Key::Named(NamedKey::ArrowDown) => return self.overlay_move(1),
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(query) = self.overlay.query_mut() {
+                    if command {
+                        query.clear();
+                    } else {
+                        query.pop();
+                    }
+                }
+                return self.overlay_changed();
+            }
+            _ => {}
+        }
+        match action {
+            // A few commands make sense while an overlay is open.
+            Some(Action::Paste) => {
+                let text = get_clipboard().unwrap_or_default();
+                self.overlay_type(text.lines().next().unwrap_or(""));
+            }
+            Some(action @ (Action::FindNext | Action::FindPrevious | Action::Quit)) => {
+                self.perform(action, event_loop);
+            }
+            Some(Action::CommandPalette | Action::Find) => self.close_overlay(),
+            Some(_) => {}
+            None if !command => {
+                if let Some(text) = event.text.as_deref() {
+                    self.overlay_type(text);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn overlay_type(&mut self, text: &str) {
+        if let Some(query) = self.overlay.query_mut() {
+            query.extend(text.chars().filter(|c| !c.is_control()));
+            self.overlay_changed();
+        }
+    }
+
+    /// The query was edited.
+    fn overlay_changed(&mut self) {
+        match &mut self.overlay {
+            Overlay::Palette { selected, .. } => *selected = 0,
+            Overlay::Search { query, .. } => {
+                self.last_search = query.clone();
+                self.search_step(SearchDirection::Left, false);
+            }
+            Overlay::None => {}
+        }
+        self.redraw();
+    }
+
+    fn overlay_move(&mut self, offset: isize) {
+        match &mut self.overlay {
+            Overlay::Palette { query, selected } => {
+                let count = actions::search(query).len() as isize;
+                if count > 0 {
+                    *selected = (*selected as isize + offset).rem_euclid(count) as usize;
+                }
+                self.redraw();
+            }
+            // Up goes to older matches, down to newer ones.
+            Overlay::Search { .. } => {
+                let direction = if offset < 0 { SearchDirection::Left } else { SearchDirection::Right };
+                self.search_step(direction, true);
+            }
+            Overlay::None => {}
+        }
+    }
+
+    fn overlay_confirm(&mut self, shift: bool, event_loop: &ActiveEventLoop) {
+        match &self.overlay {
+            Overlay::Palette { query, selected } => {
+                let chosen = actions::search(query).get(*selected).map(|command| command.0);
+                self.close_overlay();
+                if let Some(action) = chosen {
+                    self.perform(action, event_loop);
+                }
+            }
+            Overlay::Search { .. } => {
+                let direction = if shift { SearchDirection::Right } else { SearchDirection::Left };
+                self.search_step(direction, true);
+            }
+            Overlay::None => {}
+        }
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay = Overlay::None;
+        self.redraw();
+    }
+
+    fn open_search(&mut self) {
+        let Some(pane) = self.focused_pane_id() else { return };
+        // Start from the selected text when there is some on one line.
+        let selected = self.focused_pane().and_then(|p| p.terminal.lock().selection_to_string());
+        let query = match selected {
+            Some(text) if !text.trim().is_empty() && !text.trim().contains('\n') => text.trim().to_owned(),
+            _ => self.last_search.clone(),
+        };
+        self.last_search = query.clone();
+        self.overlay = Overlay::Search { pane, query, failed: false };
+        self.search_step(SearchDirection::Left, false);
+    }
+
+    /// Finds a match for the current search text and selects it.
+    ///
+    /// `advance` moves on from the current match (Find Next/Previous);
+    /// without it the search restarts from the current match, which is what
+    /// typing more letters should do. Left means towards older output.
+    fn search_step(&mut self, direction: SearchDirection, advance: bool) {
+        let pane_id = match &self.overlay {
+            Overlay::Search { pane, .. } => Some(*pane),
+            _ => self.focused_pane_id(),
+        };
+        let query = self.last_search.clone();
+        let Some(pane) = pane_id.and_then(|id| self.panes.get(&id)) else { return };
+
+        let mut found = false;
+        if !query.is_empty()
+            && let Ok(mut regex) = RegexSearch::new(&overlay::regex_escape(&query))
+        {
+            let mut term = pane.terminal.lock();
+            let current = term.selection.as_ref().and_then(|s| s.to_range(&*term));
+            let bottom = Point::new(term.bottommost_line(), term.last_column());
+            let top = Point::new(term.topmost_line(), Column(0));
+            let origin = match (current, direction, advance) {
+                (Some(range), SearchDirection::Left, true) => range.start.sub(&*term, Boundary::None, 1),
+                (Some(range), SearchDirection::Right, true) => range.end.add(&*term, Boundary::None, 1),
+                (Some(range), _, false) => range.end,
+                (None, ..) => Point::new(
+                    Line(term.screen_lines() as i32 - 1 - term.grid().display_offset() as i32),
+                    term.last_column(),
+                ),
+            };
+            let side = if direction == SearchDirection::Left { Side::Right } else { Side::Left };
+            // Search from the origin; when nothing is left that way, wrap
+            // around to the other end.
+            let wrap_origin = if direction == SearchDirection::Left { bottom } else { top };
+            let hit = term
+                .search_next(&mut regex, origin, direction, side, None)
+                .or_else(|| term.search_next(&mut regex, wrap_origin, direction, side, None));
+            if let Some(hit) = hit {
+                let mut selection = Selection::new(SelectionType::Simple, *hit.start(), Side::Left);
+                selection.update(*hit.end(), Side::Right);
+                term.selection = Some(selection);
+                term.scroll_to_point(*hit.start());
+                found = true;
+            } else {
+                term.selection = None;
+            }
+        }
+        if let Overlay::Search { failed, query, .. } = &mut self.overlay {
+            *failed = !found && !query.is_empty();
+        }
+        self.redraw();
+    }
+
+    /// Scrolls so the previous (or next) shell prompt is at the top of the
+    /// pane. Needs shell integration, which tags prompt cells.
+    fn jump_to_prompt(&mut self, previous: bool) {
+        let Some(pane) = self.focused_pane() else { return };
+        let mut term = pane.terminal.lock();
+        let offset = term.grid().display_offset() as i32;
+        let (first, last) = (term.topmost_line().0, term.bottommost_line().0);
+        let tagged = |line: i32| {
+            term.grid()[Line(line)][Column(0)]
+                .hyperlink()
+                .is_some_and(|link| link.uri().starts_with(ale_core::PROMPT_TAG))
+        };
+        // A prompt can span several lines; its start is the first of them.
+        let is_start = |line: i32| tagged(line) && (line == first || !tagged(line - 1));
+        let top = -offset;
+        let target = if previous {
+            (first..top).rev().find(|line| is_start(*line))
+        } else {
+            (top + 1..=last).find(|line| is_start(*line))
+        };
+        if let Some(line) = target {
+            term.scroll_display(Scroll::Delta(-line - offset));
+        } else if !previous {
+            term.scroll_display(Scroll::Bottom);
+        }
+        drop(term);
+        self.redraw();
     }
 
     /// Sends typed bytes to the focused pane. Typing snaps the view back to
@@ -659,6 +865,31 @@ impl App {
             {
                 self.report_mouse(pane, rect, MouseAction::Release, code, mode);
             }
+            return;
+        }
+
+        // An open palette takes every click: on a row runs it, elsewhere
+        // closes the palette.
+        if let Overlay::Palette { query, selected } = &self.overlay {
+            let commands = actions::search(query);
+            let chosen = self
+                .palette_layout(commands.len(), *selected)
+                .and_then(|layout| layout.row_at(x, y))
+                .and_then(|index| commands.get(index))
+                .map(|command| command.0);
+            self.close_overlay();
+            if let (Some(action), MouseButton::Left) = (chosen, mouse_button) {
+                self.perform(action, event_loop);
+            }
+            return;
+        }
+
+        // Cmd+click opens the link under the mouse.
+        if mouse_button == MouseButton::Left
+            && self.modifiers.super_key()
+            && let Some(link) = &self.hover_link
+        {
+            open_target(&link.target);
             return;
         }
 
@@ -787,9 +1018,13 @@ impl App {
             }
         }
 
+        self.update_hover_link();
+
         // Show what a click would do.
-        let icon = if self.tab_bar().bar.contains(x, y) {
+        let icon = if self.tab_bar().bar.contains(x, y) || matches!(self.overlay, Overlay::Palette { .. }) {
             CursorIcon::Default
+        } else if self.hover_link.is_some() {
+            CursorIcon::Pointer
         } else {
             match self.divider_at(&layout, x, y) {
                 Some(Divider { axis: Axis::Horizontal, .. }) => CursorIcon::ColResize,
@@ -800,6 +1035,118 @@ impl App {
         if let Some(window) = &self.window {
             window.set_cursor(icon);
         }
+    }
+
+    fn palette_layout(&self, count: usize, selected: usize) -> Option<PaletteLayout> {
+        let metrics = self.renderer.as_ref()?.metrics();
+        let cell = (metrics.width, metrics.height);
+        Some(PaletteLayout::new(self.window_size(), cell, self.scale(), count, selected))
+    }
+
+    /// Recomputes which link (if any) is under the mouse. Links are only
+    /// active while Cmd is held, so normal clicks and selection are never
+    /// affected.
+    fn update_hover_link(&mut self) {
+        let (x, y) = (self.mouse.x, self.mouse.y);
+        let mut link = None;
+        if self.modifiers.super_key() && !self.overlay.is_open() && matches!(self.mouse.drag, Drag::None) {
+            let layout = self.active_layout();
+            if let Some(pane) = layout.pane_at(x, y)
+                && let Some(rect) = layout.rect_of(pane)
+            {
+                link = self.link_at(pane, rect, x, y);
+            }
+        }
+        let changed = match (&link, &self.hover_link) {
+            (None, None) => false,
+            (Some(a), Some(b)) => a.pane != b.pane || a.start != b.start || a.end != b.end,
+            _ => true,
+        };
+        self.hover_link = link;
+        if changed {
+            self.redraw();
+        }
+    }
+
+    /// Finds a link at a window position: an explicit hyperlink set by the
+    /// program, a web address, or a path to an existing file.
+    fn link_at(&self, pane_id: PaneId, rect: Rect, x: f32, y: f32) -> Option<HoverLink> {
+        let pane = self.panes.get(&pane_id)?;
+        let (column, line, _) = self.cell_at(pane_id, rect, x, y);
+        let term = pane.terminal.lock();
+        let point = term::viewport_to_point(term.grid().display_offset(), Point::new(line, Column(column)));
+        let grid = term.grid();
+        let last_column = term.last_column();
+        let wraps = |line: Line| grid[line][last_column].flags.contains(Flags::WRAPLINE);
+
+        // Explicit hyperlink (OSC 8): covers the neighbouring cells that
+        // carry the same address.
+        if let Some(hyperlink) = grid[point.line][point.column].hyperlink() {
+            let uri = hyperlink.uri();
+            let allowed = ["https://", "http://", "file://", "mailto:"].iter().any(|s| uri.starts_with(s));
+            if !allowed {
+                return None;
+            }
+            let same = |column: Column| {
+                grid[point.line][column].hyperlink().is_some_and(|other| other.uri() == uri)
+            };
+            let (mut start, mut end) = (point.column, point.column);
+            while start.0 > 0 && same(start - 1) {
+                start -= 1;
+            }
+            while end < last_column && same(end + 1) {
+                end += 1;
+            }
+            return Some(HoverLink {
+                pane: pane_id,
+                start: Point::new(point.line, start),
+                end: Point::new(point.line, end),
+                target: Target::Url(uri.to_owned()),
+            });
+        }
+
+        // Otherwise look at the text. A long address may be wrapped over
+        // several rows, so gather the whole logical line first.
+        let mut first = point.line;
+        while first > term.topmost_line() && point.line - first < 20 && wraps(first - 1) {
+            first -= 1;
+        }
+        let mut last = point.line;
+        while last < term.bottommost_line() && last - point.line < 20 && wraps(last) {
+            last += 1;
+        }
+        let mut chars = Vec::new();
+        let mut points = Vec::new();
+        let mut at = None;
+        let mut current = first;
+        while current <= last {
+            for column in 0..term.columns() {
+                let cell = &grid[current][Column(column)];
+                let cell_point = Point::new(current, Column(column));
+                if cell_point == point {
+                    at = Some(chars.len());
+                }
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                chars.push(if cell.c == '\0' { ' ' } else { cell.c });
+                points.push(cell_point);
+            }
+            current += 1;
+        }
+        let at = at?.min(chars.len().checked_sub(1)?);
+        drop(term);
+
+        let found = links::url_at(&chars, at).or_else(|| {
+            let cwd = pane.terminal.working_directory();
+            links::path_at(&chars, at, cwd.as_deref(), |path| path.exists())
+        })?;
+        Some(HoverLink {
+            pane: pane_id,
+            start: points[found.start],
+            end: points[found.end - 1],
+            target: found.target,
+        })
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
@@ -861,6 +1208,7 @@ impl App {
             TermEvent::Title(title) => {
                 if let Some(pane) = self.panes.get_mut(&id) {
                     pane.title = Some(title).filter(|t| !t.trim().is_empty());
+                    pane.title_set = Instant::now();
                     self.redraw();
                 }
             }
@@ -897,39 +1245,49 @@ impl App {
                     pane.terminal.write(reply.into_bytes());
                 }
             }
+            TermEvent::ShellChanged => self.redraw(),
             TermEvent::Bell => {}
         }
     }
 
     // ---- Drawing ----------------------------------------------------------
 
-    /// Refreshes the folder-name titles of panes whose program set no title.
+    /// Refreshes the folder-name titles of panes without shell integration.
     /// At most once a second per pane, since it asks the OS each time.
+    /// (Integrated shells report their folder themselves.)
     fn refresh_fallback_titles(&mut self) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        for id in tab.root.panes() {
-            let Some(pane) = self.panes.get_mut(&id) else { continue };
-            if pane.title.is_some() || pane.fallback_checked.elapsed() < Duration::from_secs(1) {
+        for tab in &self.tabs {
+            let Some(pane) = self.panes.get_mut(&tab.focused) else { continue };
+            if pane.fallback_checked.elapsed() < Duration::from_secs(1) {
                 continue;
             }
             pane.fallback_checked = Instant::now();
             if let Some(directory) = pane.terminal.working_directory() {
-                pane.fallback_title = if Some(&directory) == home.as_ref() {
-                    "~".into()
-                } else {
-                    directory
-                        .file_name()
-                        .map_or_else(|| "/".into(), |name| name.to_string_lossy().into_owned())
-                };
+                pane.fallback_title = folder_name(&directory);
             }
         }
     }
 
+    /// The label for a tab, from its focused pane.
+    ///
+    /// With shell integration we know what is going on: at a prompt the tab
+    /// shows the folder; while a command runs it shows the title that
+    /// program set, or else the command itself. Without integration we can
+    /// only show the last title set, or the folder.
     fn tab_title(&self, tab: &Tab) -> String {
-        match self.panes.get(&tab.focused) {
-            Some(pane) => pane.title.clone().unwrap_or_else(|| pane.fallback_title.clone()),
-            None => String::new(),
+        let Some(pane) = self.panes.get(&tab.focused) else { return String::new() };
+        let shell = pane.terminal.shell();
+        if !shell.integrated {
+            return pane.title.clone().unwrap_or_else(|| pane.fallback_title.clone());
+        }
+        let folder = shell.cwd.as_deref().map(folder_name).unwrap_or_else(|| pane.fallback_title.clone());
+        let Some(command) = shell.command else { return folder };
+        let set_by_program =
+            shell.command_started.is_some_and(|started| pane.title_set > started);
+        match (&pane.title, set_by_program) {
+            (Some(title), true) => title.clone(),
+            _ if command.is_empty() => folder,
+            _ => format!("{command} — {folder}"),
         }
     }
 
@@ -942,15 +1300,40 @@ impl App {
         let focused_pane = self.focused_pane_id();
         let scale = self.scale();
         let padding = self.padding();
+        let window = self.window_size();
         let Some(renderer) = self.renderer.as_mut() else { return };
         let palette = &self.palette;
         let metrics = renderer.metrics();
+
+        // Move newly decoded images to the GPU (for every pane, so images
+        // printed in background tabs do not pile up in memory), then keep
+        // total image memory within the configured budget.
+        for (id, pane) in &self.panes {
+            let (added, removed) = pane.terminal.take_images();
+            for image in added {
+                renderer.upload_image(image_key(*id, image.id), image.width, image.height, &image.rgba);
+            }
+            for image_id in removed {
+                renderer.remove_image(image_key(*id, image_id));
+            }
+        }
+        renderer.limit_image_memory(self.config.terminal.image_memory_mb as usize * 1024 * 1024);
 
         renderer.begin(color(palette.background));
         for (id, rect) in &layout.panes {
             let Some(pane) = self.panes.get(id) else { continue };
             let is_focused = Some(*id) == focused_pane;
-            let style = PaneStyle { palette, metrics, padding, focused: is_focused && self.focused };
+            let link = self.hover_link.as_ref().filter(|l| l.pane == *id).map(|l| (l.start, l.end));
+            let style =
+                PaneStyle {
+                palette,
+                metrics,
+                padding,
+                focused: is_focused && self.focused,
+                link,
+                ligatures: self.config.font.ligatures,
+                image_key_base: image_key(*id, 0),
+            };
             draw::pane(renderer, &pane.terminal.lock(), *rect, &style);
             if !is_focused {
                 // Fade panes that are not receiving input.
@@ -963,6 +1346,19 @@ impl App {
             renderer.rect(x, y, w, h, color(palette.border));
         }
         tab_bar.draw(renderer, &titles, self.active, scale, palette);
+
+        match &self.overlay {
+            Overlay::Palette { query, selected } => {
+                let commands = actions::search(query);
+                overlay::draw_palette(renderer, query, *selected, &commands, window, scale, palette);
+            }
+            Overlay::Search { pane, query, failed } => {
+                if let Some(rect) = layout.rect_of(*pane) {
+                    overlay::draw_search(renderer, query, *failed, rect, scale, palette);
+                }
+            }
+            Overlay::None => {}
+        }
     }
 
     fn draw(&mut self) {
@@ -1041,6 +1437,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        if self.config.terminal.shell_integration
+            && let Some(dir) = ale_config::config_path().as_deref().and_then(|p| p.parent())
+        {
+            match ale_core::integration::install(dir) {
+                Ok(dir) => self.integration = Some(dir),
+                Err(e) => log::warn!("shell integration not installed: {e}"),
+            }
+        }
+
         self.new_tab(self.options.working_directory.clone());
         if self.tabs.is_empty() {
             return event_loop.exit();
@@ -1095,11 +1500,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.redraw();
             }
-            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                // Pressing or releasing Cmd turns link highlighting on or off.
+                self.update_hover_link();
+            }
             WindowEvent::KeyboardInput { event, .. } => self.key(&event, event_loop),
             // Text composed by the system: accents typed with dead keys,
             // emoji picker, input methods.
-            WindowEvent::Ime(Ime::Commit(text)) => self.send_input(text.into_bytes()),
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                if self.overlay.is_open() {
+                    self.overlay_type(&text);
+                } else {
+                    self.send_input(text.into_bytes());
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position),
             WindowEvent::MouseInput { state, button, .. } => {
                 self.mouse_button(state, button, event_loop)
@@ -1110,12 +1525,29 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Test hook: run scripted steps shortly before the snapshot.
+        if let Some(at) = self.snapshot_at
+            && !self.options.script.is_empty()
+            && Instant::now() + Duration::from_millis(600) >= at
+        {
+            for step in std::mem::take(&mut self.options.script) {
+                if let Some(text) = step.strip_prefix("type:") {
+                    self.overlay_type(text);
+                } else if let Some(command) = actions::COMMANDS.iter().find(|c| c.1 == step) {
+                    self.perform(command.0, event_loop);
+                } else {
+                    eprintln!("ale-term: unknown script step {step:?}");
+                }
+            }
+        }
         if let Some(at) = self.snapshot_at {
             if Instant::now() >= at {
                 self.take_snapshot();
                 event_loop.exit();
             } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+                let script_at = at - Duration::from_millis(600);
+                let next = if self.options.script.is_empty() { at } else { script_at };
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             }
         }
     }
@@ -1166,4 +1598,31 @@ fn write_bmp(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> st
         out.resize(out.len() + (row_size - width * 3) as usize, 0);
     }
     std::fs::write(path, out)
+}
+
+/// Opens a link with the system's default app. The target is passed as a
+/// single argument, never through a shell.
+fn open_target(target: &Target) {
+    let mut command = std::process::Command::new("open");
+    match target {
+        Target::Url(url) => command.arg(url),
+        Target::File(path) => command.arg(path),
+    };
+    if let Err(e) = command.spawn() {
+        log::warn!("cannot open link: {e}");
+    }
+}
+
+/// The short name shown for a folder: its last component, `~` for home.
+fn folder_name(directory: &std::path::Path) -> String {
+    if std::env::var_os("HOME").is_some_and(|home| directory == std::path::Path::new(&home)) {
+        return "~".into();
+    }
+    directory.file_name().map_or_else(|| "/".into(), |name| name.to_string_lossy().into_owned())
+}
+
+/// The renderer key for an image: pane id in the high half, the pane's own
+/// image id in the low half.
+fn image_key(pane: PaneId, image: u32) -> u64 {
+    (pane << 32) | image as u64
 }

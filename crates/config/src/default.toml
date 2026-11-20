@@ -6,6 +6,8 @@
 family = "Menlo"
 size = 13.0
 line_height = 1.25
+# Join pairs such as -> and != when the font has ligatures.
+ligatures = true
 
 [window]
 width = 1100.0
@@ -19,6 +21,10 @@ scrollback = 10000
 # Send ESC + key for Option combinations instead of composing characters.
 option_as_meta = false
 scroll_multiplier = 3.0
+# Let zsh report its folder, prompts and running command to the terminal.
+shell_integration = true
+# Memory budget for inline images, in megabytes.
+image_memory_mb = 128
 
 [theme]
 # "auto" follows the macOS appearance; or force "dark" / "light".

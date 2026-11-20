@@ -37,11 +37,14 @@ pub struct FontConfig {
     pub size: f32,
     /// Line height as a multiple of the font size.
     pub line_height: f32,
+    /// Join character pairs such as `->` and `!=` into single glyphs when
+    /// the font provides them (Fira Code, JetBrains Mono, ...).
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { family: "Menlo".into(), size: 13.0, line_height: 1.25 }
+        Self { family: "Menlo".into(), size: 13.0, line_height: 1.25, ligatures: true }
     }
 }
 
@@ -75,6 +78,10 @@ pub struct TerminalConfig {
     pub option_as_meta: bool,
     /// Lines scrolled per mouse-wheel notch.
     pub scroll_multiplier: f32,
+    /// Let the shell report its folder, prompts and commands (zsh only).
+    pub shell_integration: bool,
+    /// Memory budget for inline images, in megabytes.
+    pub image_memory_mb: u32,
 }
 
 impl Default for TerminalConfig {
@@ -85,6 +92,8 @@ impl Default for TerminalConfig {
             shell_args: Vec::new(),
             option_as_meta: false,
             scroll_multiplier: 3.0,
+            shell_integration: true,
+            image_memory_mb: 128,
         }
     }
 }

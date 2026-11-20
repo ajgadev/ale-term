@@ -33,6 +33,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
 const KIND_RECT: u32 = 0;
 const KIND_MASK: u32 = 1;
 const KIND_COLOR: u32 = 2;
+const KIND_IMAGE: u32 = 3;
 
 /// One rectangle sent to the GPU. Must match `Instance` in `shader.wgsl`.
 #[repr(C)]
@@ -73,6 +74,23 @@ struct SpriteRun {
     len: u32,
 }
 
+/// An inline image uploaded to the GPU.
+struct ImageTexture {
+    /// Binds this image in place of the glyph atlas.
+    bind_group: wgpu::BindGroup,
+    /// GPU memory used, for the image budget.
+    bytes: usize,
+}
+
+/// A run of instances drawn with the same texture bound: the glyph atlas
+/// (`image` is `None`) or one image. Batches are drawn in order, so things
+/// queued later appear on top.
+struct Batch {
+    image: Option<u64>,
+    start: u32,
+    count: u32,
+}
+
 /// Bold and italic packed into one small cache key.
 fn style_bits(bold: bool, italic: bool) -> u8 {
     bold as u8 | (italic as u8) << 1
@@ -98,7 +116,14 @@ pub struct Renderer {
     /// How many instances `instance_buffer` can hold.
     instance_capacity: usize,
     instances: Vec<Instance>,
+    batches: Vec<Batch>,
     clear: Color,
+
+    images: HashMap<u64, ImageTexture>,
+    /// Image keys, oldest first, for evicting when over budget.
+    image_order: std::collections::VecDeque<u64>,
+    image_bytes: usize,
+    max_texture_side: u32,
 
     font: FontStack,
     packer: ShelfPacker,
@@ -153,6 +178,7 @@ impl Renderer {
             .await
             .map_err(|e| e.to_string())?;
 
+        let max_texture_side = device.limits().max_texture_dimension_2d;
         let caps = surface.get_capabilities(&adapter);
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
@@ -275,7 +301,12 @@ impl Renderer {
             instance_buffer,
             instance_capacity,
             instances: Vec::with_capacity(instance_capacity),
+            batches: Vec::new(),
             clear: [0, 0, 0, 255],
+            images: HashMap::new(),
+            image_order: Default::default(),
+            image_bytes: 0,
+            max_texture_side,
             font,
             packer: ShelfPacker::new(INITIAL_ATLAS_SIZE),
             sprites: Vec::new(),
@@ -317,6 +348,7 @@ impl Renderer {
     /// Starts a new frame filled with `clear`.
     pub fn begin(&mut self, clear: Color) {
         self.instances.clear();
+        self.batches.clear();
         self.clear = clear;
         self.atlas_rebuilt = false;
     }
@@ -326,13 +358,96 @@ impl Renderer {
         if width <= 0.0 || height <= 0.0 || color[3] == 0 {
             return;
         }
-        self.instances.push(Instance {
-            pos: [x, y],
-            size: [width, height],
-            uv: [0.0; 4],
-            color,
-            kind: KIND_RECT,
+        self.push(Instance { pos: [x, y], size: [width, height], uv: [0.0; 4], color, kind: KIND_RECT }, None);
+    }
+
+    /// Queues an instance, extending the current batch when it uses the
+    /// same texture and starting a new one otherwise.
+    fn push(&mut self, instance: Instance, image: Option<u64>) {
+        let index = self.instances.len() as u32;
+        self.instances.push(instance);
+        match self.batches.last_mut() {
+            Some(batch) if batch.image == image => batch.count += 1,
+            _ => self.batches.push(Batch { image, start: index, count: 1 }),
+        }
+    }
+
+    // ---- Images -------------------------------------------------------
+
+    /// Uploads an image under `key`, replacing any image with that key.
+    /// Images too large for the GPU are ignored.
+    pub fn upload_image(&mut self, key: u64, width: u32, height: u32, rgba: &[u8]) {
+        let fits = width > 0 && height > 0 && width.max(height) <= self.max_texture_side;
+        if !fits || rgba.len() < (width * height * 4) as usize {
+            return;
+        }
+        self.remove_image(key);
+        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            &rgba[..(width * height * 4) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: None },
+            size,
+        );
+        let bind_group = create_bind_group(
+            &self.device,
+            &self.bind_group_layout,
+            &self.globals_buffer,
+            &texture,
+            &self.sampler,
+        );
+        let bytes = (width * height * 4) as usize;
+        self.images.insert(key, ImageTexture { bind_group, bytes });
+        self.image_order.push_back(key);
+        self.image_bytes += bytes;
+    }
+
+    pub fn remove_image(&mut self, key: u64) {
+        if let Some(image) = self.images.remove(&key) {
+            self.image_bytes -= image.bytes;
+            self.image_order.retain(|k| *k != key);
+        }
+    }
+
+    /// Removes every image whose key fails `keep`.
+    pub fn retain_images(&mut self, keep: impl Fn(u64) -> bool) {
+        let doomed: Vec<u64> = self.images.keys().copied().filter(|key| !keep(*key)).collect();
+        for key in doomed {
+            self.remove_image(key);
+        }
+    }
+
+    /// Frees the oldest images until at most `budget` bytes of image
+    /// memory are in use.
+    pub fn limit_image_memory(&mut self, budget: usize) {
+        while self.image_bytes > budget {
+            let Some(oldest) = self.image_order.front().copied() else { break };
+            self.remove_image(oldest);
+        }
+    }
+
+    pub fn image_memory(&self) -> usize {
+        self.image_bytes
+    }
+
+    /// Draws part of an image. `uv` is the part to show as x, y, width and
+    /// height in the 0..1 range. Does nothing if the image is not loaded.
+    pub fn image(&mut self, key: u64, x: f32, y: f32, width: f32, height: f32, uv: [f32; 4]) {
+        if width > 0.0 && height > 0.0 && self.images.contains_key(&key) {
+            let instance =
+                Instance { pos: [x, y], size: [width, height], uv, color: [255; 4], kind: KIND_IMAGE };
+            self.push(instance, Some(key));
+        }
     }
 
     /// Draws the text of one terminal cell whose top-left corner is at
@@ -360,14 +475,16 @@ impl Renderer {
                 }
             },
         };
-        for sprite in &self.sprites[run.start as usize..(run.start + run.len) as usize] {
-            self.instances.push(Instance {
+        for index in run.start as usize..(run.start + run.len) as usize {
+            let sprite = self.sprites[index];
+            let instance = Instance {
                 pos: [x + sprite.left, y + sprite.top],
                 size: [sprite.width, sprite.height],
                 uv: [sprite.atlas_x, sprite.atlas_y, sprite.width, sprite.height],
                 color,
                 kind: if sprite.color { KIND_COLOR } else { KIND_MASK },
-            });
+            };
+            self.push(instance, None);
         }
     }
 
@@ -593,9 +710,19 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-            pass.draw(0..4, 0..self.instances.len() as u32);
+            for batch in &self.batches {
+                let bind_group = match batch.image {
+                    None => &self.bind_group,
+                    // Removed since it was queued: skip.
+                    Some(key) => match self.images.get(&key) {
+                        Some(image) => &image.bind_group,
+                        None => continue,
+                    },
+                };
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..4, batch.start..batch.start + batch.count);
+            }
         }
         self.queue.submit([encoder.finish()]);
     }

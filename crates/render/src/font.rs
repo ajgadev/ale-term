@@ -4,6 +4,8 @@
 //! characters the main font lacks (emoji, CJK, symbols) and turns glyph
 //! outlines into bitmaps.
 
+use unicode_width::UnicodeWidthChar;
+
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
 };
@@ -91,18 +93,32 @@ impl FontStack {
         self.buffer.shape_until_scroll(&mut self.system, false);
     }
 
-    /// Rasterizes the contents of one cell: usually a single character, or a
-    /// base character plus combining marks. Returns one bitmap per glyph
+    /// Rasterizes a short piece of text laid out on the cell grid: usually a
+    /// single character, sometimes a character plus combining marks, or a
+    /// run of punctuation that the font may join into a ligature.
+    ///
+    /// The text is shaped as a whole (so the font can substitute ligature
+    /// glyphs), but each glyph is then placed at the cell its character
+    /// belongs to rather than where the font's own spacing would put it.
+    /// That keeps everything on the grid even though the cell width is the
+    /// font's advance rounded to whole pixels. Returns one bitmap per glyph
     /// (none for whitespace).
     pub fn rasterize(&mut self, text: &str, bold: bool, italic: bool) -> Vec<RasterGlyph> {
         self.shape(text, bold, italic);
         let baseline = self.metrics.baseline as i32;
+        let cell_width = self.metrics.width as i32;
 
         let mut out = Vec::new();
         let Self { system, swash, buffer, .. } = self;
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
-                let physical = glyph.physical((0.0, 0.0), 1.0);
+                // Which cell this glyph's character starts in.
+                let cells_before: usize = text
+                    .get(..glyph.start)
+                    .map_or(0, |before| before.chars().map(|c| c.width().unwrap_or(0)).sum());
+                // Cancel the font's own pen position, keeping only the
+                // glyph's offset relative to it.
+                let physical = glyph.physical((-glyph.x, 0.0), 1.0);
                 let Some(image) = swash.get_image_uncached(system, physical.cache_key) else {
                     continue;
                 };
@@ -123,7 +139,7 @@ impl FontStack {
                     SwashContent::SubpixelMask => continue,
                 };
                 out.push(RasterGlyph {
-                    left: physical.x + image.placement.left,
+                    left: cells_before as i32 * cell_width + physical.x + image.placement.left,
                     top: baseline + physical.y - image.placement.top,
                     width,
                     height,

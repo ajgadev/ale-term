@@ -7,12 +7,15 @@
 //! * `ale-render` draws rectangles and glyphs on the GPU,
 //! * `ale-config` loads settings and themes.
 
+mod actions;
 mod app;
 mod boxdraw;
 mod chrome;
 mod draw;
 mod input;
 mod layout;
+mod links;
+mod overlay;
 
 use std::path::PathBuf;
 
@@ -32,6 +35,9 @@ pub struct Options {
     pub type_text: Option<String>,
     /// Open an extra tab and a split to exercise the layout.
     pub demo: bool,
+    /// Steps run just before the snapshot: a palette command name, or
+    /// `type:<text>` to type into the open palette or search bar.
+    pub script: Vec<String>,
 }
 
 const USAGE: &str = "\
@@ -55,6 +61,7 @@ fn parse_args() -> Result<Options, String> {
             }
             "--type" => options.type_text = Some(value("--type")?),
             "--demo" => options.demo = true,
+            "--do" => options.script.push(value("--do")?),
             "-v" | "--version" => {
                 println!("ale-term {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
