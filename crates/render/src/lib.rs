@@ -13,6 +13,7 @@
 
 mod atlas;
 mod font;
+mod upload;
 
 use std::collections::HashMap;
 
@@ -112,9 +113,8 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     atlas_texture: wgpu::Texture,
 
-    instance_buffer: wgpu::Buffer,
-    /// How many instances `instance_buffer` can hold.
-    instance_capacity: usize,
+    /// Gets each frame's instances to the GPU; see the `upload` module.
+    uploader: upload::InstanceUploader,
     instances: Vec<Instance>,
     batches: Vec<Batch>,
     clear: Color,
@@ -172,6 +172,9 @@ impl Renderer {
                 // so big windows and the glyph atlas fit.
                 required_limits: wgpu::Limits::downlevel_defaults()
                     .using_resolution(adapter.limits()),
+                // Lets frame data be written straight into GPU-visible
+                // memory (see `upload`); optional.
+                required_features: adapter.features() & upload::InstanceUploader::FEATURE,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 ..Default::default()
             })
@@ -281,8 +284,7 @@ impl Renderer {
             create_bind_group(&device, &bind_group_layout, &globals_buffer, &atlas_texture, &sampler);
 
         log::info!("gpu ready in {:?}", started.elapsed());
-        let instance_capacity = 4096;
-        let instance_buffer = create_instance_buffer(&device, instance_capacity);
+        let uploader = upload::InstanceUploader::new(&device);
 
         let started = std::time::Instant::now();
         let font = FontStack::new(&font.family, font.size_px, font.line_height);
@@ -298,9 +300,8 @@ impl Renderer {
             globals_buffer,
             sampler,
             atlas_texture,
-            instance_buffer,
-            instance_capacity,
-            instances: Vec::with_capacity(instance_capacity),
+            uploader,
+            instances: Vec::with_capacity(4096),
             batches: Vec::new(),
             clear: [0, 0, 0, 255],
             images: HashMap::new(),
@@ -681,11 +682,8 @@ impl Renderer {
     }
 
     fn draw(&mut self, view: &wgpu::TextureView) {
-        if self.instances.len() > self.instance_capacity {
-            self.instance_capacity = self.instances.len().next_power_of_two();
-            self.instance_buffer = create_instance_buffer(&self.device, self.instance_capacity);
-        }
-        self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.instances));
+        let instance_buffer =
+            self.uploader.upload(&self.device, &self.queue, bytemuck::cast_slice(&self.instances));
 
         let channel = |v: u8| v as f64 / 255.0;
         let clear = wgpu::Color {
@@ -710,7 +708,7 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
+            pass.set_vertex_buffer(0, instance_buffer.slice(..));
             for batch in &self.batches {
                 let bind_group = match batch.image {
                     None => &self.bind_group,
@@ -725,6 +723,7 @@ impl Renderer {
             }
         }
         self.queue.submit([encoder.finish()]);
+        self.uploader.submitted();
     }
 }
 
@@ -757,14 +756,5 @@ fn create_bind_group(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
         ],
-    })
-}
-
-fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("instances"),
-        size: (capacity * size_of::<Instance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     })
 }
