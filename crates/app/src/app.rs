@@ -6,6 +6,8 @@
 //! title changes, exit) and config-file changes. Nothing is drawn unless one
 //! of those events asks for it, so an idle window uses no CPU.
 
+mod workspaces;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,7 +35,9 @@ use winit::window::{CursorIcon, Theme, Window, WindowId};
 use crate::Options;
 use crate::actions::{self, Action};
 use crate::links::{self, Target};
-use crate::overlay::{self, Overlay, PaletteLayout};
+use crate::overlay::{self, InputKind, ListKind, Overlay, PaletteLayout};
+use crate::workspace::{self, Approvals, TabId, Workspace, WorkspaceId};
+use workspaces::Choice;
 use crate::chrome::{TabBar, TabBarHit};
 use crate::draw::{self, PaneStyle, color};
 use crate::input::{self, MouseAction, button};
@@ -57,9 +61,21 @@ struct Pane {
     fallback_checked: Instant,
     /// Leftover trackpad scroll, in pixels, not yet amounting to a line.
     scroll_remainder: f32,
+    /// Text to type once the shell shows its first prompt (a template's
+    /// command, or a restored command line). Typing it any earlier would
+    /// have the terminal echo it before the prompt appears.
+    pending_input: Option<Vec<u8>>,
+    created: Instant,
 }
 
 struct Tab {
+    id: TabId,
+    /// The workspace this tab is shown in.
+    workspace: WorkspaceId,
+    /// Title given by the user or a template; otherwise automatic.
+    custom_title: Option<String>,
+    /// Stays in its workspace even when its folder changes project.
+    pinned: bool,
     root: Node,
     /// The pane that receives keyboard input.
     focused: PaneId,
@@ -109,9 +125,21 @@ pub struct App {
     focused: bool,
 
     panes: HashMap<PaneId, Pane>,
+    /// Every tab of every workspace; the tab bar shows those of
+    /// `active_ws`.
     tabs: Vec<Tab>,
+    /// Index of the tab on screen. It always belongs to `active_ws`.
     active: usize,
+    workspaces: Vec<Workspace>,
+    active_ws: WorkspaceId,
+    /// Source of ids for panes, tabs and workspaces.
     next_pane_id: PaneId,
+    /// Per-project template files the user has allowed to run commands.
+    approvals: Approvals,
+    /// Where the session and approvals are stored.
+    state_dir: Option<PathBuf>,
+    /// When to write the session to disk next, if it changed.
+    save_at: Option<Instant>,
 
     modifiers: ModifiersState,
     mouse: Mouse,
@@ -134,6 +162,7 @@ impl App {
             log::warn!("config: {error}");
         }
         let palette = config.palette(true);
+        let state_dir = workspace::state_dir();
         App {
             options,
             proxy,
@@ -146,7 +175,12 @@ impl App {
             panes: HashMap::new(),
             tabs: Vec::new(),
             active: 0,
+            workspaces: Vec::new(),
+            active_ws: 0,
             next_pane_id: 1,
+            approvals: state_dir.as_deref().map(Approvals::load).unwrap_or_default(),
+            state_dir,
+            save_at: None,
             modifiers: ModifiersState::empty(),
             mouse: Mouse {
                 x: 0.0,
@@ -193,7 +227,9 @@ impl App {
 
     fn tab_bar(&self) -> TabBar {
         let fullscreen = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
-        TabBar::layout(self.tabs.len(), self.window_size().0, self.scale(), fullscreen)
+        let label = TabBar::workspace_label(self.workspace_name());
+        let label_width = self.renderer.as_ref().map_or(0.0, |r| r.text_width(&label));
+        TabBar::layout(self.visible_tabs().len(), self.window_size().0, self.scale(), fullscreen, label_width)
     }
 
     /// The area below the tab bar, where panes go.
@@ -239,6 +275,7 @@ impl App {
                 }
             }
         }
+        self.mark_dirty();
         self.redraw();
     }
 
@@ -278,8 +315,7 @@ impl App {
     /// Starts a shell in a new pane. `rect` is where the pane will be, so the
     /// shell starts at the right size.
     fn spawn_pane(&mut self, working_directory: Option<PathBuf>, rect: Rect) -> Option<PaneId> {
-        let id = self.next_pane_id;
-        self.next_pane_id += 1;
+        let id = self.next_id();
 
         let proxy = self.proxy.clone();
         let callback = Arc::new(move |id, event| {
@@ -305,6 +341,8 @@ impl App {
                     // Already "expired", so the first draw looks up the folder.
                     fallback_checked: Instant::now() - Duration::from_secs(60),
                     scroll_remainder: 0.0,
+                    pending_input: None,
+                    created: Instant::now(),
                 };
                 self.panes.insert(id, pane);
                 Some(id)
@@ -323,12 +361,17 @@ impl App {
 
     fn new_tab(&mut self, working_directory: Option<PathBuf>) {
         let directory = working_directory.or_else(|| self.inherited_directory());
-        if let Some(id) = self.spawn_pane(directory, self.content_rect()) {
+        if let Some(id) = self.spawn_pane(directory.clone(), self.content_rect()) {
+            // The very first tab has no workspace to join yet.
+            let workspace = if self.tabs.is_empty() {
+                self.workspace_for(directory.as_deref().and_then(workspace::project_root))
+            } else {
+                self.active_ws
+            };
             // Next to the current tab, like browsers do.
-            let index = (self.active + 1).min(self.tabs.len());
-            self.tabs.insert(index, Tab { root: Node::Leaf(id), focused: id });
-            self.active = index;
-            self.redraw();
+            let index = self.add_tab(self.active + 1, id, workspace);
+            self.activate(index);
+            self.sync_workspace(index);
         }
     }
 
@@ -367,10 +410,8 @@ impl App {
                 tab.root = root;
             }
             None => {
-                self.tabs.remove(index);
-                if self.active > index || self.active >= self.tabs.len() {
-                    self.active = self.active.saturating_sub(1);
-                }
+                let removed = self.tabs.remove(index);
+                self.after_tab_removed(index, removed.workspace, index == self.active);
             }
         }
         self.relayout();
@@ -386,18 +427,21 @@ impl App {
         done
     }
 
+    /// Shows the tab at position `index` of the tab bar.
     fn select_tab(&mut self, index: usize) {
-        if index < self.tabs.len() && index != self.active {
-            self.active = index;
-            self.redraw();
+        if let Some(&tab) = self.visible_tabs().get(index)
+            && tab != self.active
+        {
+            self.activate(tab);
         }
     }
 
     /// Moves `offset` tabs right (or left when negative), wrapping around.
     fn cycle_tab(&mut self, offset: isize) {
-        let count = self.tabs.len() as isize;
-        if count > 0 {
-            self.select_tab((self.active as isize + offset).rem_euclid(count) as usize);
+        let visible = self.visible_tabs();
+        if let Some(current) = visible.iter().position(|tab| *tab == self.active) {
+            let next = (current as isize + offset).rem_euclid(visible.len() as isize) as usize;
+            self.select_tab(next);
         }
     }
 
@@ -406,6 +450,8 @@ impl App {
             && tab.focused != id
         {
             tab.focused = id;
+            // The tab is now "in" the newly focused pane's folder.
+            self.sync_workspace(self.active);
             self.redraw();
         }
     }
@@ -493,13 +539,37 @@ impl App {
                     event_loop.exit();
                 }
             }
+            Action::CloseTab => {
+                if self.close_tab(self.active) {
+                    event_loop.exit();
+                }
+            }
+            Action::RenameTab => {
+                let query = self.tabs.get(self.active).and_then(|t| t.custom_title.clone()).unwrap_or_default();
+                self.overlay = Overlay::Input { kind: InputKind::RenameTab, query };
+                self.redraw();
+            }
+            Action::SwitchWorkspace => self.open_list(ListKind::Workspaces),
+            Action::NextWorkspace => self.cycle_workspace(1),
+            Action::PreviousWorkspace => self.cycle_workspace(-1),
+            Action::NewWorkspace => {
+                self.overlay = Overlay::Input { kind: InputKind::NewWorkspace, query: String::new() };
+                self.redraw();
+            }
+            Action::RenameWorkspace => {
+                let query = self.workspace_name().to_owned();
+                self.overlay = Overlay::Input { kind: InputKind::RenameWorkspace, query };
+                self.redraw();
+            }
+            Action::MoveTab => self.open_list(ListKind::MoveTab),
+            Action::SetUpWorkspace => self.set_up_workspace(),
             Action::SplitRight => self.split(Axis::Horizontal),
             Action::SplitDown => self.split(Axis::Vertical),
             Action::NextTab => self.cycle_tab(1),
             Action::PreviousTab => self.cycle_tab(-1),
             Action::SelectTab(index) => {
                 // Cmd+9 always goes to the last tab.
-                let last = self.tabs.len().saturating_sub(1);
+                let last = self.visible_tabs().len().saturating_sub(1);
                 self.select_tab(if index == 8 { last } else { (index as usize).min(last) });
             }
             Action::NextPane => self.cycle_pane(1),
@@ -528,13 +598,15 @@ impl App {
                     );
                 }
             }
-            Action::CommandPalette => {
-                self.overlay = Overlay::Palette { query: String::new(), selected: 0 };
-                self.redraw();
-            }
+            Action::CommandPalette => self.open_list(ListKind::Commands),
             Action::OpenConfig => open_config_file(),
             Action::Quit => event_loop.exit(),
         }
+    }
+
+    fn open_list(&mut self, kind: ListKind) {
+        self.overlay = Overlay::Palette { kind, query: String::new(), selected: 0 };
+        self.redraw();
     }
 
     fn scroll(&mut self, scroll: Scroll) {
@@ -608,7 +680,7 @@ impl App {
             Some(action @ (Action::FindNext | Action::FindPrevious | Action::Quit)) => {
                 self.perform(action, event_loop);
             }
-            Some(Action::CommandPalette | Action::Find) => self.close_overlay(),
+            Some(Action::CommandPalette | Action::Find | Action::SwitchWorkspace) => self.close_overlay(),
             Some(_) => {}
             None if !command => {
                 if let Some(text) = event.text.as_deref() {
@@ -634,17 +706,18 @@ impl App {
                 self.last_search = query.clone();
                 self.search_step(SearchDirection::Left, false);
             }
-            Overlay::None => {}
+            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
         }
         self.redraw();
     }
 
     fn overlay_move(&mut self, offset: isize) {
-        match &mut self.overlay {
-            Overlay::Palette { query, selected } => {
-                let count = actions::search(query).len() as isize;
-                if count > 0 {
-                    *selected = (*selected as isize + offset).rem_euclid(count) as usize;
+        match &self.overlay {
+            Overlay::Palette { kind, query, selected } => {
+                let count = self.list_items(*kind, query).len() as isize;
+                let next = (*selected as isize + offset).rem_euclid(count.max(1)) as usize;
+                if let Overlay::Palette { selected, .. } = &mut self.overlay {
+                    *selected = next;
                 }
                 self.redraw();
             }
@@ -653,24 +726,36 @@ impl App {
                 let direction = if offset < 0 { SearchDirection::Left } else { SearchDirection::Right };
                 self.search_step(direction, true);
             }
-            Overlay::None => {}
+            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
         }
     }
 
     fn overlay_confirm(&mut self, shift: bool, event_loop: &ActiveEventLoop) {
         match &self.overlay {
-            Overlay::Palette { query, selected } => {
-                let chosen = actions::search(query).get(*selected).map(|command| command.0);
+            Overlay::Palette { kind, query, selected } => {
+                let chosen = self.list_items(*kind, query).get(*selected).map(|item| item.choice);
                 self.close_overlay();
-                if let Some(action) = chosen {
-                    self.perform(action, event_loop);
-                }
+                self.run_choice(chosen, event_loop);
             }
+            Overlay::Input { kind, query } => {
+                let (kind, text) = (*kind, query.clone());
+                self.close_overlay();
+                self.submit_input(kind, &text);
+            }
+            Overlay::Confirm(_) => self.confirm_accepted(),
             Overlay::Search { .. } => {
                 let direction = if shift { SearchDirection::Right } else { SearchDirection::Left };
                 self.search_step(direction, true);
             }
             Overlay::None => {}
+        }
+    }
+
+    fn run_choice(&mut self, choice: Option<Choice>, event_loop: &ActiveEventLoop) {
+        match choice {
+            Some(Choice::Run(action)) => self.perform(action, event_loop),
+            Some(choice) => self.choose(choice),
+            None => {}
         }
     }
 
@@ -870,16 +955,19 @@ impl App {
 
         // An open palette takes every click: on a row runs it, elsewhere
         // closes the palette.
-        if let Overlay::Palette { query, selected } = &self.overlay {
-            let commands = actions::search(query);
-            let chosen = self
-                .palette_layout(commands.len(), *selected)
-                .and_then(|layout| layout.row_at(x, y))
-                .and_then(|index| commands.get(index))
-                .map(|command| command.0);
+        if self.overlay.is_modal() {
+            let mut chosen = None;
+            if let Overlay::Palette { kind, query, selected } = &self.overlay {
+                let items = self.list_items(*kind, query);
+                chosen = self
+                    .palette_layout(items.len(), *selected)
+                    .and_then(|layout| layout.row_at(x, y))
+                    .and_then(|index| items.get(index))
+                    .map(|item| item.choice);
+            }
             self.close_overlay();
-            if let (Some(action), MouseButton::Left) = (chosen, mouse_button) {
-                self.perform(action, event_loop);
+            if mouse_button == MouseButton::Left {
+                self.run_choice(chosen, event_loop);
             }
             return;
         }
@@ -898,10 +986,13 @@ impl App {
             match (hit, mouse_button) {
                 (TabBarHit::Tab(index), MouseButton::Left) => self.select_tab(index),
                 (TabBarHit::Tab(index), MouseButton::Middle) => {
-                    if self.close_tab(index) {
+                    if let Some(&tab) = self.visible_tabs().get(index)
+                        && self.close_tab(tab)
+                    {
                         event_loop.exit();
                     }
                 }
+                (TabBarHit::Workspace, MouseButton::Left) => self.open_list(ListKind::Workspaces),
                 (TabBarHit::NewTab, MouseButton::Left) => self.new_tab(None),
                 (TabBarHit::Empty, MouseButton::Left) => {
                     let clicks = self.register_click();
@@ -1021,7 +1112,7 @@ impl App {
         self.update_hover_link();
 
         // Show what a click would do.
-        let icon = if self.tab_bar().bar.contains(x, y) || matches!(self.overlay, Overlay::Palette { .. }) {
+        let icon = if self.tab_bar().bar.contains(x, y) || self.overlay.is_modal() {
             CursorIcon::Default
         } else if self.hover_link.is_some() {
             CursorIcon::Pointer
@@ -1245,17 +1336,55 @@ impl App {
                     pane.terminal.write(reply.into_bytes());
                 }
             }
-            TermEvent::ShellChanged => self.redraw(),
+            TermEvent::ShellChanged => {
+                // The folder may have changed project: regroup the tab.
+                if let Some(index) = self.tabs.iter().position(|tab| tab.focused == id) {
+                    self.sync_workspace(index);
+                }
+                self.mark_dirty();
+                self.redraw();
+            }
+            TermEvent::PromptReady => self.flush_pending_input(id),
             TermEvent::Bell => {}
         }
     }
 
     // ---- Drawing ----------------------------------------------------------
 
+    /// Queues text to be typed into a pane when its shell is ready.
+    fn type_when_ready(&mut self, id: PaneId, bytes: Vec<u8>) {
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.pending_input = Some(bytes);
+        }
+    }
+
+    fn flush_pending_input(&mut self, id: PaneId) {
+        if let Some(pane) = self.panes.get_mut(&id)
+            && let Some(bytes) = pane.pending_input.take()
+        {
+            pane.terminal.write(bytes);
+        }
+    }
+
+    /// Shells without integration never announce their prompt; give them a
+    /// few seconds to start and then type anyway.
+    fn flush_overdue_input(&mut self) {
+        let overdue: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, pane)| pane.pending_input.is_some() && pane.created.elapsed() > Duration::from_secs(3))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in overdue {
+            self.flush_pending_input(id);
+        }
+    }
+
     /// Refreshes the folder-name titles of panes without shell integration.
     /// At most once a second per pane, since it asks the OS each time.
     /// (Integrated shells report their folder themselves.)
     fn refresh_fallback_titles(&mut self) {
+        let mut stale = Vec::new();
         for tab in &self.tabs {
             let Some(pane) = self.panes.get_mut(&tab.focused) else { continue };
             if pane.fallback_checked.elapsed() < Duration::from_secs(1) {
@@ -1264,6 +1393,16 @@ impl App {
             pane.fallback_checked = Instant::now();
             if let Some(directory) = pane.terminal.working_directory() {
                 pane.fallback_title = folder_name(&directory);
+            }
+            if !pane.terminal.shell().integrated {
+                stale.push(tab.id);
+            }
+        }
+        // Without shell integration nothing tells us when the folder
+        // changes, so regroup these tabs on the same slow schedule.
+        for id in stale {
+            if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                self.sync_workspace(index);
             }
         }
     }
@@ -1275,6 +1414,9 @@ impl App {
     /// program set, or else the command itself. Without integration we can
     /// only show the last title set, or the folder.
     fn tab_title(&self, tab: &Tab) -> String {
+        if let Some(title) = &tab.custom_title {
+            return title.clone();
+        }
         let Some(pane) = self.panes.get(&tab.focused) else { return String::new() };
         let shell = pane.terminal.shell();
         if !shell.integrated {
@@ -1294,9 +1436,21 @@ impl App {
     /// Describes the whole window to the renderer.
     fn build_frame(&mut self) {
         self.refresh_fallback_titles();
+        self.flush_overdue_input();
         let layout = self.active_layout();
         let tab_bar = self.tab_bar();
-        let titles: Vec<String> = self.tabs.iter().map(|tab| self.tab_title(tab)).collect();
+        let visible = self.visible_tabs();
+        let titles: Vec<String> = visible.iter().map(|i| self.tab_title(&self.tabs[*i])).collect();
+        let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
+        let workspace_name = self.workspace_name().to_owned();
+        // Rows of an open list overlay, computed before the renderer is
+        // borrowed.
+        let list_rows: Vec<(String, String)> = match &self.overlay {
+            Overlay::Palette { kind, query, .. } => {
+                self.list_items(*kind, query).into_iter().map(|item| (item.title, item.detail)).collect()
+            }
+            _ => Vec::new(),
+        };
         let focused_pane = self.focused_pane_id();
         let scale = self.scale();
         let padding = self.padding();
@@ -1345,13 +1499,17 @@ impl App {
             let Rect { x, y, w, h } = divider.rect;
             renderer.rect(x, y, w, h, color(palette.border));
         }
-        tab_bar.draw(renderer, &titles, self.active, scale, palette);
+        tab_bar.draw(renderer, &workspace_name, &titles, active_position, scale, palette);
 
         match &self.overlay {
-            Overlay::Palette { query, selected } => {
-                let commands = actions::search(query);
-                overlay::draw_palette(renderer, query, *selected, &commands, window, scale, palette);
+            Overlay::Palette { kind, query, selected } => {
+                let placeholder = kind.placeholder();
+                overlay::draw_palette(renderer, placeholder, query, *selected, &list_rows, window, scale, palette);
             }
+            Overlay::Input { kind, query } => {
+                overlay::draw_palette(renderer, kind.placeholder(), query, 0, &[], window, scale, palette);
+            }
+            Overlay::Confirm(confirm) => overlay::draw_confirm(renderer, confirm, window, scale, palette),
             Overlay::Search { pane, query, failed } => {
                 if let Some(rect) = layout.rect_of(*pane) {
                     overlay::draw_search(renderer, query, *failed, rect, scale, palette);
@@ -1371,6 +1529,12 @@ impl App {
         if again {
             self.redraw();
         }
+    }
+
+    /// When scripted test steps run: 1.5 seconds after launch (once the
+    /// first shell is up), but always before the snapshot.
+    fn script_time(&self, snapshot_at: Instant) -> Instant {
+        (self.launched + Duration::from_millis(1500)).min(snapshot_at - Duration::from_millis(600))
     }
 
     /// Saves a picture of the window (for automated visual checks).
@@ -1446,7 +1610,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
-        self.new_tab(self.options.working_directory.clone());
+        // Pick up where the last run left off, unless asked for a specific
+        // folder.
+        let restored = self.config.window.restore
+            && self.options.working_directory.is_none()
+            && self.restore_session();
+        if !restored {
+            self.new_tab(self.options.working_directory.clone());
+        }
         if self.tabs.is_empty() {
             return event_loop.exit();
         }
@@ -1524,15 +1695,32 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_session();
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Write the session a moment after the last change.
+        if let Some(at) = self.save_at {
+            if Instant::now() >= at {
+                self.save_session();
+            } else if self.snapshot_at.is_none() {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            }
+        } else if self.snapshot_at.is_none() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+
         // Test hook: run scripted steps shortly before the snapshot.
         if let Some(at) = self.snapshot_at
             && !self.options.script.is_empty()
-            && Instant::now() + Duration::from_millis(600) >= at
+            && Instant::now() >= self.script_time(at)
         {
             for step in std::mem::take(&mut self.options.script) {
                 if let Some(text) = step.strip_prefix("type:") {
                     self.overlay_type(text);
+                } else if step == "enter" {
+                    self.overlay_confirm(false, event_loop);
                 } else if let Some(command) = actions::COMMANDS.iter().find(|c| c.1 == step) {
                     self.perform(command.0, event_loop);
                 } else {
@@ -1545,8 +1733,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.take_snapshot();
                 event_loop.exit();
             } else {
-                let script_at = at - Duration::from_millis(600);
-                let next = if self.options.script.is_empty() { at } else { script_at };
+                let next = if self.options.script.is_empty() { at } else { self.script_time(at) };
                 event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             }
         }

@@ -26,6 +26,70 @@ pub struct Config {
     pub window: WindowConfig,
     pub terminal: TerminalConfig,
     pub theme: ThemeConfig,
+    /// Workspace templates: the tabs to open for a project.
+    #[serde(rename = "workspace")]
+    pub workspaces: Vec<WorkspaceTemplate>,
+}
+
+/// The tabs to open for one project, set up in one go from the workspace
+/// switcher.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTemplate {
+    /// Shown in the switcher; defaults to the folder's name.
+    pub name: Option<String>,
+    /// The project folder. `~/` is expanded.
+    pub root: String,
+    #[serde(default)]
+    pub tabs: Vec<TabTemplate>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TabTemplate {
+    /// Fixed tab title; without one the tab is titled automatically.
+    pub title: Option<String>,
+    /// Command typed into the tab's shell when it opens.
+    pub command: Option<String>,
+    /// Folder to start in, relative to the workspace root.
+    pub dir: Option<String>,
+}
+
+impl WorkspaceTemplate {
+    pub fn root_path(&self) -> PathBuf {
+        expand_home(&self.root)
+    }
+
+    pub fn display_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            let root = self.root_path();
+            root.file_name().map_or_else(|| self.root.clone(), |n| n.to_string_lossy().into_owned())
+        })
+    }
+}
+
+/// Replaces a leading `~` with the home folder.
+pub fn expand_home(path: &str) -> PathBuf {
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    match path.strip_prefix("~/") {
+        Some(rest) => home().map_or_else(|| PathBuf::from(path), |home| home.join(rest)),
+        None if path == "~" => home().unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
+    }
+}
+
+/// Name of the optional per-project file listing a repository's own tabs.
+pub const REPO_TEMPLATE_FILE: &str = ".ale-term.toml";
+
+/// Parses a per-project file: just a `tabs = [...]` list.
+pub fn parse_repo_template(text: &str) -> Result<Vec<TabTemplate>, String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RepoFile {
+        #[serde(default)]
+        tabs: Vec<TabTemplate>,
+    }
+    toml::from_str::<RepoFile>(text).map(|file| file.tabs).map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]
@@ -56,11 +120,13 @@ pub struct WindowConfig {
     pub height: f32,
     /// Space between a pane's edge and its text, in points.
     pub padding: f32,
+    /// Reopen the previous workspaces, tabs and splits at launch.
+    pub restore: bool,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { width: 1100.0, height: 700.0, padding: 8.0 }
+        Self { width: 1100.0, height: 700.0, padding: 8.0, restore: true }
     }
 }
 
@@ -247,6 +313,43 @@ mod tests {
     fn out_of_range_values_are_clamped() {
         let config = Config::parse("[font]\nsize = 500").unwrap();
         assert_eq!(config.font.size, 72.0);
+    }
+
+    #[test]
+    fn workspace_templates_parse() {
+        let config = Config::parse(
+            r#"
+            [[workspace]]
+            root = "~/Dev/shop"
+            tabs = [
+                { title = "agent", command = "claude" },
+                { title = "server", command = "npm run dev", dir = "web" },
+                { },
+            ]
+
+            [[workspace]]
+            name = "Notes"
+            root = "/tmp/notes"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.workspaces.len(), 2);
+        let shop = &config.workspaces[0];
+        assert_eq!(shop.display_name(), "shop");
+        assert!(shop.root_path().is_absolute());
+        assert_eq!(shop.tabs[1].dir.as_deref(), Some("web"));
+        assert_eq!(shop.tabs[2], TabTemplate::default());
+        assert_eq!(config.workspaces[1].display_name(), "Notes");
+        assert!(config.workspaces[1].tabs.is_empty());
+    }
+
+    #[test]
+    fn repo_template_parses_and_rejects_unknown_keys() {
+        let tabs = parse_repo_template("tabs = [{ command = \"make dev\" }, { title = \"git\" }]").unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].command.as_deref(), Some("make dev"));
+        assert!(parse_repo_template("shell = \"x\"").is_err());
+        assert_eq!(parse_repo_template("").unwrap(), vec![]);
     }
 
     #[test]

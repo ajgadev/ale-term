@@ -13,6 +13,8 @@ ligatures = true
 width = 1100.0
 height = 700.0
 padding = 8.0
+# Reopen the previous workspaces, tabs and splits at launch.
+restore = true
 
 [terminal]
 scrollback = 10000
@@ -41,3 +43,18 @@ mode = "auto"
 #
 # [theme.light]
 # background = "#ffffff"
+
+# Workspaces: the tabs to open for a project, in one go, from the workspace
+# switcher (Cmd+P). Add one [[workspace]] block per project, for example:
+#
+# [[workspace]]
+# root = "~/Dev/my-project"
+# tabs = [
+#   { title = "agent", command = "claude" },
+#   { title = "server", command = "npm run dev" },
+#   { title = "git" },
+# ]
+#
+# A project can also carry its own list in a `.ale-term.toml` file at its
+# root (same `tabs = [...]` format). ale-term asks before running commands
+# from such a file.

@@ -2,20 +2,78 @@
 //! bar. This module holds their state, layout and drawing; the app decides
 //! what happens when a command is chosen or the query changes.
 
-use ale_config::Palette;
+use std::path::PathBuf;
+
+use ale_config::{Palette, TabTemplate};
 use ale_render::Renderer;
 
-use crate::actions::Action;
 use crate::draw::color;
 use crate::layout::{PaneId, Rect};
+
+/// What a list overlay is choosing from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKind {
+    /// The command palette.
+    Commands,
+    /// Open workspaces and workspace templates.
+    Workspaces,
+    /// Destination for the current tab.
+    MoveTab,
+}
+
+impl ListKind {
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            ListKind::Commands => "Type a command",
+            ListKind::Workspaces => "Switch to a workspace",
+            ListKind::MoveTab => "Move tab to workspace",
+        }
+    }
+}
+
+/// What a one-line text prompt is asking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    RenameTab,
+    RenameWorkspace,
+    NewWorkspace,
+}
+
+impl InputKind {
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            InputKind::RenameTab => "Tab title (empty for automatic)",
+            InputKind::RenameWorkspace => "Workspace name",
+            InputKind::NewWorkspace => "Name for the new workspace",
+        }
+    }
+}
+
+/// A yes/no question with some detail lines.
+pub struct Confirm {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// What Enter will do, e.g. "Enter: run  ·  Esc: cancel".
+    pub hint: String,
+    /// The per-project template awaiting approval: project root, the file's
+    /// contents and the tabs it defines. `None` for purely informational
+    /// messages.
+    pub template: Option<(PathBuf, String, Vec<TabTemplate>)>,
+}
 
 pub enum Overlay {
     None,
     Palette {
+        kind: ListKind,
         query: String,
-        /// Index into the filtered command list.
+        /// Index into the filtered list.
         selected: usize,
     },
+    Input {
+        kind: InputKind,
+        query: String,
+    },
+    Confirm(Box<Confirm>),
     Search {
         pane: PaneId,
         query: String,
@@ -29,11 +87,18 @@ impl Overlay {
         !matches!(self, Overlay::None)
     }
 
+    /// True for overlays that cover the window and take every click.
+    pub fn is_modal(&self) -> bool {
+        matches!(self, Overlay::Palette { .. } | Overlay::Input { .. } | Overlay::Confirm(_))
+    }
+
     /// The text being edited, if any.
     pub fn query_mut(&mut self) -> Option<&mut String> {
         match self {
-            Overlay::Palette { query, .. } | Overlay::Search { query, .. } => Some(query),
-            Overlay::None => None,
+            Overlay::Palette { query, .. } | Overlay::Input { query, .. } | Overlay::Search { query, .. } => {
+                Some(query)
+            }
+            Overlay::None | Overlay::Confirm(_) => None,
         }
     }
 }
@@ -80,25 +145,27 @@ fn outline(r: &mut Renderer, rect: Rect, line: f32, c: ale_render::Color) {
     r.rect(rect.x + rect.w - line, rect.y, line, rect.h, c);
 }
 
+/// Draws a list overlay: an input line and the rows matching it. Each row
+/// is a title and a right-aligned detail. With no rows it is a plain text
+/// prompt.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_palette(
     r: &mut Renderer,
+    placeholder: &str,
     query: &str,
     selected: usize,
-    commands: &[&(Action, &str, &str)],
+    rows: &[(String, String)],
     window: (f32, f32),
     scale: f32,
     palette: &Palette,
 ) {
     let metrics = r.metrics();
-    let layout = PaletteLayout::new(window, (metrics.width, metrics.height), scale, commands.len(), selected);
+    let layout = PaletteLayout::new(window, (metrics.width, metrics.height), scale, rows.len(), selected);
     let line = scale.round().max(1.0);
     let pad = (14.0 * scale).round();
     let text_dy = ((layout.input.h - metrics.height) / 2.0).round();
 
-    // Dim everything behind the palette.
-    let [br, bg, bb, _] = color(palette.background);
-    r.rect(0.0, 0.0, window.0, window.1, [br, bg, bb, 110]);
-
+    dim_background(r, window, palette);
     let frame = layout.frame;
     r.rect(frame.x, frame.y, frame.w, frame.h, color(palette.chrome));
     outline(r, frame.inflate(line), line, color(palette.border));
@@ -107,24 +174,74 @@ pub fn draw_palette(
     let input = layout.input;
     let text_width = input.w - pad * 2.0;
     let typed = if query.is_empty() {
-        r.text("Type a command", false, input.x + pad, input.y + text_dy, text_width, color(palette.chrome_text_dim));
+        r.text(placeholder, false, input.x + pad, input.y + text_dy, text_width, color(palette.chrome_text_dim));
         0.0
     } else {
         r.text(query, false, input.x + pad, input.y + text_dy, text_width, color(palette.foreground))
     };
     r.rect(input.x + pad + typed, input.y + text_dy, line * 2.0, metrics.height, color(palette.accent));
-    r.rect(input.x, input.y + input.h - line, input.w, line, color(palette.border));
+    if !layout.rows.is_empty() {
+        r.rect(input.x, input.y + input.h - line, input.w, line, color(palette.border));
+    }
 
-    for (row, command) in layout.rows.iter().zip(commands.iter().skip(layout.first)) {
-        let index = layout.first + (row.y - layout.rows[0].y).div_euclid(row.h) as usize;
-        let (_, name, keys) = **command;
-        if index == selected {
+    for (offset, (row, (title, detail))) in layout.rows.iter().zip(rows.iter().skip(layout.first)).enumerate() {
+        if layout.first + offset == selected {
             r.rect(row.x, row.y, row.w, row.h, color(palette.selection));
         }
-        let keys_width = r.text_width(keys);
-        r.text(name, false, row.x + pad, row.y + text_dy, row.w - pad * 3.0 - keys_width, color(palette.foreground));
-        r.text(keys, false, row.x + row.w - pad - keys_width, row.y + text_dy, keys_width, color(palette.chrome_text_dim));
+        // The detail gives way to the title when space is short.
+        let title_width = r.text_width(title);
+        let detail_room = (row.w - pad * 3.0 - title_width).max(0.0);
+        let detail = fit_end(detail, detail_room, metrics.width);
+        let detail_width = r.text_width(&detail);
+        r.text(title, false, row.x + pad, row.y + text_dy, row.w - pad * 2.0, color(palette.foreground));
+        r.text(&detail, false, row.x + row.w - pad - detail_width, row.y + text_dy, detail_width, color(palette.chrome_text_dim));
     }
+}
+
+/// Keeps the end of `text` (the interesting part of a path) when it does
+/// not fit in `width` pixels.
+fn fit_end(text: &str, width: f32, cell_width: f32) -> String {
+    let room = (width / cell_width).floor() as usize;
+    let count = text.chars().count();
+    if count <= room {
+        return text.to_owned();
+    }
+    if room < 2 {
+        return String::new();
+    }
+    let tail: String = text.chars().skip(count - (room - 1)).collect();
+    format!("…{tail}")
+}
+
+fn dim_background(r: &mut Renderer, window: (f32, f32), palette: &Palette) {
+    let [red, green, blue, _] = color(palette.background);
+    r.rect(0.0, 0.0, window.0, window.1, [red, green, blue, 110]);
+}
+
+pub fn draw_confirm(r: &mut Renderer, confirm: &Confirm, window: (f32, f32), scale: f32, palette: &Palette) {
+    let metrics = r.metrics();
+    let line = scale.round().max(1.0);
+    let pad = (18.0 * scale).round();
+    let row = (metrics.height + 6.0 * scale).round();
+    let width = (640.0 * scale).min(window.0 - 32.0 * scale).max(metrics.width * 10.0).round();
+    // Title, a gap, the lines, a gap, the hint.
+    let height = pad * 2.0 + row * (confirm.lines.len() as f32 + 2.0) + pad;
+    let frame = Rect::new(((window.0 - width) / 2.0).round(), (window.1 * 0.16).round(), width, height);
+    let text_width = frame.w - pad * 2.0;
+
+    dim_background(r, window, palette);
+    r.rect(frame.x, frame.y, frame.w, frame.h, color(palette.chrome));
+    outline(r, frame.inflate(line), line, color(palette.border));
+
+    let mut y = frame.y + pad;
+    r.text(&confirm.title, true, frame.x + pad, y, text_width, color(palette.foreground));
+    y += row + pad / 2.0;
+    for text in &confirm.lines {
+        r.text(text, false, frame.x + pad, y, text_width, color(palette.foreground));
+        y += row;
+    }
+    y += pad / 2.0;
+    r.text(&confirm.hint, false, frame.x + pad, y, text_width, color(palette.chrome_text_dim));
 }
 
 /// The search bar, in the top-right corner of the pane being searched.
@@ -181,6 +298,13 @@ mod tests {
         let row = layout.rows[1];
         assert_eq!(layout.row_at(row.x + 5.0, row.y + 5.0), Some(10));
         assert_eq!(layout.row_at(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn long_details_keep_their_end() {
+        assert_eq!(fit_end("~/Dev/project", 200.0, 8.0), "~/Dev/project");
+        assert_eq!(fit_end("~/Dev/project", 64.0, 8.0), "…project");
+        assert_eq!(fit_end("~/Dev/project", 8.0, 8.0), "");
     }
 
     #[test]

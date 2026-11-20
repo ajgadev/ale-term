@@ -48,6 +48,8 @@ pub enum TermEvent {
     Bell,
     /// The shell exited or the PTY closed.
     Exit,
+    /// The shell has drawn a prompt and is waiting for input.
+    PromptReady,
     /// The shell reported a new folder, or a command started or finished.
     /// Read the details with [`Terminal::shell`].
     ShellChanged,

@@ -15,9 +15,13 @@ const BAR_HEIGHT: f32 = 38.0;
 const TRAFFIC_LIGHTS: f32 = 78.0;
 const TAB_MAX_WIDTH: f32 = 240.0;
 const TAB_PADDING: f32 = 14.0;
+const WORKSPACE_MAX_WIDTH: f32 = 220.0;
 
 pub struct TabBar {
     pub bar: Rect,
+    /// The workspace name, left of the tabs; clicking it opens the
+    /// workspace switcher.
+    pub workspace: Rect,
     pub tabs: Vec<Rect>,
     /// The "+" button.
     pub new_tab: Rect,
@@ -27,6 +31,7 @@ pub struct TabBar {
 pub enum TabBarHit {
     Tab(usize),
     NewTab,
+    Workspace,
     /// Empty space, used for dragging the window.
     Empty,
 }
@@ -34,10 +39,21 @@ pub enum TabBarHit {
 impl TabBar {
     /// Computes where everything in the tab bar goes.
     ///
-    /// `fullscreen` windows have no traffic lights, so tabs start at the edge.
-    pub fn layout(tab_count: usize, window_width: f32, scale: f32, fullscreen: bool) -> TabBar {
+    /// `fullscreen` windows have no traffic lights, so content starts at the
+    /// edge. `workspace_width` is the width of the workspace label's text.
+    pub fn layout(
+        tab_count: usize,
+        window_width: f32,
+        scale: f32,
+        fullscreen: bool,
+        workspace_width: f32,
+    ) -> TabBar {
         let height = (BAR_HEIGHT * scale).round();
-        let left = if fullscreen { 0.0 } else { (TRAFFIC_LIGHTS * scale).round() };
+        let lights = if fullscreen { 0.0 } else { (TRAFFIC_LIGHTS * scale).round() };
+        let padding = (TAB_PADDING * scale).round();
+        let label = (workspace_width + padding * 2.0).min(WORKSPACE_MAX_WIDTH * scale).min(window_width * 0.3);
+        let workspace = Rect::new(lights, 0.0, label.round(), height);
+        let left = lights + workspace.w;
         let button = height;
         let available = (window_width - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
@@ -47,6 +63,7 @@ impl TabBar {
             .collect();
         TabBar {
             bar: Rect::new(0.0, 0.0, window_width, height),
+            workspace,
             tabs,
             new_tab: Rect::new(left + tab_count as f32 * width, 0.0, button, height),
         }
@@ -66,10 +83,26 @@ impl TabBar {
         if self.new_tab.contains(x, y) {
             return Some(TabBarHit::NewTab);
         }
+        if self.workspace.contains(x, y) {
+            return Some(TabBarHit::Workspace);
+        }
         Some(TabBarHit::Empty)
     }
 
-    pub fn draw(&self, r: &mut Renderer, titles: &[String], active: usize, scale: f32, palette: &Palette) {
+    /// The text shown for a workspace, with a marker hinting it is a menu.
+    pub fn workspace_label(name: &str) -> String {
+        format!("{name} ▾")
+    }
+
+    pub fn draw(
+        &self,
+        r: &mut Renderer,
+        workspace: &str,
+        titles: &[String],
+        active: usize,
+        scale: f32,
+        palette: &Palette,
+    ) {
         let metrics = r.metrics();
         let line = scale.round().max(1.0);
         let bar = self.bar;
@@ -78,6 +111,10 @@ impl TabBar {
 
         r.rect(bar.x, bar.y, bar.w, bar.h, color(palette.chrome));
         r.rect(bar.x, bar.h - line, bar.w, line, color(palette.border));
+
+        // Workspace label.
+        let label = fit(&Self::workspace_label(workspace), self.workspace.w - padding * 2.0, metrics.width);
+        r.text(&label, true, self.workspace.x + padding, text_y, self.workspace.w - padding, color(palette.accent));
 
         for (index, (tab, title)) in self.tabs.iter().zip(titles).enumerate() {
             let is_active = index == active;
@@ -126,22 +163,26 @@ mod tests {
 
     #[test]
     fn tabs_share_the_width_up_to_a_maximum() {
-        let bar = TabBar::layout(2, 1000.0, 1.0, false);
-        assert_eq!(bar.tabs[0], Rect::new(78.0, 0.0, 240.0, 38.0));
-        assert_eq!(bar.tabs[1].x, 318.0);
-        assert_eq!(bar.new_tab.x, 558.0);
+        // An 72px label plus 14px padding each side: tabs start at 78+100.
+        let bar = TabBar::layout(2, 1000.0, 1.0, false, 72.0);
+        assert_eq!(bar.workspace, Rect::new(78.0, 0.0, 100.0, 38.0));
+        assert_eq!(bar.tabs[0], Rect::new(178.0, 0.0, 240.0, 38.0));
+        assert_eq!(bar.tabs[1].x, 418.0);
+        assert_eq!(bar.new_tab.x, 658.0);
 
         // Many tabs shrink to fit and never run past the window.
-        let bar = TabBar::layout(20, 1000.0, 1.0, false);
+        let bar = TabBar::layout(20, 1000.0, 1.0, false, 72.0);
         assert!(bar.new_tab.x + bar.new_tab.w <= 1000.0);
     }
 
     #[test]
     fn hit_testing_matches_layout() {
-        let bar = TabBar::layout(2, 1000.0, 1.0, false);
-        assert_eq!(bar.hit(100.0, 10.0), Some(TabBarHit::Tab(0)));
-        assert_eq!(bar.hit(400.0, 10.0), Some(TabBarHit::Tab(1)));
-        assert_eq!(bar.hit(570.0, 10.0), Some(TabBarHit::NewTab));
+        let bar = TabBar::layout(2, 1000.0, 1.0, false, 72.0);
+        assert_eq!(bar.hit(100.0, 10.0), Some(TabBarHit::Workspace));
+        assert_eq!(bar.hit(200.0, 10.0), Some(TabBarHit::Tab(0)));
+        assert_eq!(bar.hit(500.0, 10.0), Some(TabBarHit::Tab(1)));
+        assert_eq!(bar.hit(670.0, 10.0), Some(TabBarHit::NewTab));
+        assert_eq!(bar.hit(900.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(20.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(100.0, 60.0), None);
     }

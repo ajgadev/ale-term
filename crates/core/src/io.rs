@@ -292,6 +292,8 @@ fn handle_osc(
         }
         Mark::PromptEnd => {
             parser.advance(&mut *term.lock(), b"\x1b]8;;\x1b\\");
+            drop(state);
+            listener.emit(TermEvent::PromptReady);
             return;
         }
         Mark::CommandStart(command) => {

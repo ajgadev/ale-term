@@ -3,9 +3,9 @@
 A fast, private terminal for macOS built for working with coding agents.
 No telemetry and no network access: the app never opens a connection.
 
-Status: milestone 2. A daily-usable terminal with tabs, splits, search,
-clickable links, shell integration, ligatures, inline images and a command
-palette. Agent features come in later milestones.
+Status: milestone 3. A daily-usable terminal with tabs, splits, workspaces
+per project, search, clickable links, shell integration, ligatures, inline
+images and a command palette. Agent features come in later milestones.
 
 ## Build and run
 
@@ -21,7 +21,10 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Keys | Action |
 |---|---|
 | Shift+Cmd+P | Command palette |
+| Cmd+P | Switch workspace (also: click the workspace name) |
+| Ctrl+Cmd+Right / Left | Next / previous workspace |
 | Cmd+T / Cmd+W | New tab / close pane (closes the tab with its last pane) |
+| Shift+Cmd+W | Close tab |
 | Cmd+D / Shift+Cmd+D | Split right / down |
 | Option+Cmd+Arrows | Move focus between panes |
 | Cmd+] / Cmd+[ | Next / previous pane |
@@ -41,6 +44,37 @@ Mouse: drag to select (double-click a word, triple-click a line), drag the
 line between panes to resize, middle-click a tab to close it. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
 address or file path to open it.
+
+## Workspaces
+
+Tabs are grouped by project: a tab belongs to the workspace of the git
+repository its folder is in, and the tab bar shows one workspace at a time.
+`cd` into another project and the tab moves to that project's workspace (and
+the view follows). Tabs outside any repository live in `general`.
+
+From the command palette you can also rename tabs and workspaces, move a tab
+to another workspace (it then stays there), and create a workspace by hand.
+
+**Templates** open a project's usual tabs in one go. Define them in the
+config file:
+
+    [[workspace]]
+    root = "~/Dev/my-project"
+    tabs = [
+      { title = "agent", command = "claude" },
+      { title = "server", command = "npm run dev" },
+      { title = "git" },
+    ]
+
+and pick the project in the switcher (Cmd+P). A repository can instead carry
+its own `.ale-term.toml` with the same `tabs = [...]` list; run "Set Up
+Workspace Tabs from Template" to use it. ale-term shows the commands and asks
+before running them, and asks again whenever that file changes.
+
+**Session restore**: workspaces, tabs, splits and folders are reopened at
+launch. A command that was running is typed at the prompt but not run; press
+Enter to start it again. Only folders and command lines are saved, never
+terminal contents. Turn it off with `restore = false` under `[window]`.
 
 ## Shell integration
 

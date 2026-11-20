@@ -12,4 +12,6 @@ arboard = "3.7.0"
 env_logger = "0.11.12"
 log = "0.4.35"
 pollster = "1.0.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 winit = "0.30"

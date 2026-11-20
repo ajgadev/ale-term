@@ -16,6 +16,7 @@ mod input;
 mod layout;
 mod links;
 mod overlay;
+mod workspace;
 
 use std::path::PathBuf;
 
