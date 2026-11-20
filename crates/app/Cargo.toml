@@ -1,0 +1,15 @@
+[package]
+name = "ale-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ale-config = { version = "0.1.0", path = "../config" }
+ale-core = { version = "0.1.0", path = "../core" }
+ale-render = { version = "0.1.0", path = "../render" }
+arboard = "3.7.0"
+env_logger = "0.11.12"
+log = "0.4.35"
+pollster = "1.0.3"
+winit = "0.30"

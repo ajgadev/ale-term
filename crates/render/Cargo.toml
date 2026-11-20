@@ -1,0 +1,12 @@
+[package]
+name = "ale-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+cosmic-text = "0.19.0"
+log = "0.4.35"
+unicode-width = "0.2.3"
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "metal", "vulkan", "wgsl", "parking_lot"] }

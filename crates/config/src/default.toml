@@ -1,0 +1,37 @@
+# ale-term configuration.
+# Changes are applied as soon as you save this file.
+# Every setting is optional; the values below are the defaults.
+
+[font]
+family = "Menlo"
+size = 13.0
+line_height = 1.25
+
+[window]
+width = 1100.0
+height = 700.0
+padding = 8.0
+
+[terminal]
+scrollback = 10000
+# shell = "/bin/zsh"
+# shell_args = ["-l"]
+# Send ESC + key for Option combinations instead of composing characters.
+option_as_meta = false
+scroll_multiplier = 3.0
+
+[theme]
+# "auto" follows the macOS appearance; or force "dark" / "light".
+mode = "auto"
+
+# Override individual colors of the built-in themes, for example:
+# [theme.dark]
+# background = "#101014"
+# foreground = "#e6e6e6"
+# cursor = "#e6e6e6"
+# selection = "#33467c"
+# accent = "#d97757"
+# ansi = ["#000000", ...]   # exactly 16 colors
+#
+# [theme.light]
+# background = "#ffffff"
