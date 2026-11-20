@@ -1,7 +1,6 @@
-//! Finding the working directory of the process running in a PTY.
-//!
-//! Used so that a new tab or split opens in the same folder as the pane it
-//! was created from.
+//! Asking the operating system about a PTY and the processes in it: the
+//! foreground program's working directory (so a new tab or split opens in
+//! the same folder), and the terminal's device number.
 
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -44,4 +43,47 @@ pub fn of_pid(pid: i32) -> Option<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 pub fn of_pid(pid: i32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// Device number of the terminal on the shell's side of the PTY.
+///
+/// Must be called from one thread at a time (`ptsname` returns a pointer
+/// to shared storage); sessions are only started from the main thread.
+pub fn tty_device(pty: &File) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: `ptsname` returns NULL or a NUL-terminated path valid until
+    // the next call; we copy it out immediately.
+    let path = unsafe {
+        let name = libc::ptsname(pty.as_raw_fd());
+        if name.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(name).to_owned()
+    };
+    let metadata = std::fs::metadata(path.to_str().ok()?).ok()?;
+    Some(metadata.rdev())
+}
+
+/// Device number of the calling process's controlling terminal, if it has
+/// one. The counterpart of [`tty_device`].
+#[cfg(target_os = "macos")]
+pub fn controlling_tty() -> Option<u64> {
+    use std::mem::{MaybeUninit, size_of};
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: the buffer is exactly the size we declare.
+    let written = unsafe {
+        libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the call succeeded, so the struct is initialized.
+    let device = unsafe { info.assume_init_ref().e_tdev };
+    (device != u32::MAX && device != 0).then_some(device as u64)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn controlling_tty() -> Option<u64> {
+    None
 }

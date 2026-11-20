@@ -2,7 +2,8 @@
 //! output, before the terminal emulator sees it.
 //!
 //! The emulator library understands the standard sequences but not shell
-//! integration (OSC 7, OSC 133) or inline images (OSC 1337, kitty's APC
+//! integration (OSC 7, OSC 133), desktop notifications (OSC 9, OSC 777) or
+//! inline images (OSC 1337, kitty's APC
 //! protocol). The scanner splits the byte stream into ordinary output, which
 //! is passed on untouched, and those sequences, which are handed over whole.
 //! Order is preserved, so an image is handled exactly where it appeared.
@@ -23,7 +24,7 @@ pub enum Chunk<'a> {
 }
 
 /// OSC numbers handled by us instead of the emulator.
-const OSC_HANDLED: [&[u8]; 3] = [b"7", b"133", b"1337"];
+const OSC_HANDLED: [&[u8]; 5] = [b"7", b"9", b"133", b"777", b"1337"];
 
 /// Sequences longer than this are dropped rather than buffered without end.
 const MAX_SEQUENCE: usize = 48 * 1024 * 1024;

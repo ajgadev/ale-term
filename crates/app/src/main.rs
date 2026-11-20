@@ -16,6 +16,7 @@ mod input;
 mod layout;
 mod links;
 mod overlay;
+mod sidebar;
 mod workspace;
 
 use std::path::PathBuf;
@@ -80,6 +81,24 @@ fn parse_args() -> Result<Options, String> {
 }
 
 fn main() {
+    // `ale-term hook <agent> [event]`: called by an agent's hook to report
+    // its status to the running terminal. Handled before anything else so
+    // it stays fast and silent.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("hook") {
+        let agent = args.next().unwrap_or_default();
+        let event = args.next().unwrap_or_default();
+        let state_dir = workspace::state_dir();
+        ale_agents::channel::run_hook_client(
+            &agent,
+            &event,
+            ale_core::controlling_tty(),
+            state_dir.as_deref(),
+            std::io::stdin().lock(),
+        );
+        return;
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let options = match parse_args() {

@@ -3,9 +3,10 @@
 A fast, private terminal for macOS built for working with coding agents.
 No telemetry and no network access: the app never opens a connection.
 
-Status: milestone 3. A daily-usable terminal with tabs, splits, workspaces
+Status: milestone 4. A daily-usable terminal with tabs, splits, workspaces
 per project, search, clickable links, shell integration, ligatures, inline
-images and a command palette. Agent features come in later milestones.
+images, a command palette, and a sidebar showing what each coding agent is
+doing.
 
 ## Build and run
 
@@ -21,6 +22,8 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Keys | Action |
 |---|---|
 | Shift+Cmd+P | Command palette |
+| Cmd+B | Show or hide the sidebar |
+| Shift+Cmd+A | Go to the next agent that needs you |
 | Cmd+P | Switch workspace (also: click the workspace name) |
 | Ctrl+Cmd+Right / Left | Next / previous workspace |
 | Cmd+T / Cmd+W | New tab / close pane (closes the tab with its last pane) |
@@ -44,6 +47,49 @@ Mouse: drag to select (double-click a word, triple-click a line), drag the
 line between panes to resize, middle-click a tab to close it. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
 address or file path to open it.
+
+## Agents
+
+The sidebar lists every agent and shell, grouped by project (or by status:
+the button next to the search box). Each agent shows its task, what it is
+doing right now, and how long it has been in its current state:
+
+| State | Meaning |
+|---|---|
+| Working | Busy with your request |
+| Needs you | Blocked on a permission prompt or a question |
+| Done | Finished its turn and you have not looked yet |
+| Idle | Waiting for a prompt |
+| Error / Rate limited | The turn ended with a failure or a usage limit |
+| Waiting on subagents | The main agent stopped; subagents are still running |
+
+Tabs holding an agent get a dot in the state's color. Click a row to jump to
+that pane. When an agent needs you or finishes while you are elsewhere,
+ale-term plays a sound and, if the window is not in front, shows a macOS
+notification (both can be turned off under `[agents]`).
+
+How the status is known:
+
+- **Claude Code** reports it through hooks. ale-term offers to install them
+  the first time it sees Claude Code running (a hint at the bottom of the
+  sidebar, or "Set Up Claude Code Status Hooks" in the palette). They are
+  added to `~/.claude/settings.json`, keep your other settings, leave a
+  backup next to the file, and do nothing outside ale-term. "Remove Claude
+  Code Status Hooks" takes them out again.
+- **Codex, Gemini CLI, Kiro and OpenCode** are recognized by their command
+  and followed by watching the pane: output means working, silence means
+  done, and a bell or notification request means the agent wants you. This
+  cannot tell "finished" from "waiting for an answer" as reliably as hooks.
+
+Status travels over a Unix socket on this Mac; nothing uses the network.
+
+Codex, Gemini CLI and Kiro have hook systems of their own, and `ale-term
+hook <agent>` already understands their events, but installing into their
+settings is not automated because it could not be tested here. To wire one
+up by hand, register this as the command for each of the agent's hook
+events (replace `codex` with `gemini` or `kiro`):
+
+    "${ALE_TERM_BIN:-true}" hook codex
 
 ## Workspaces
 
@@ -102,6 +148,7 @@ documented. Changes apply when the file is saved.
 | `crates/core` | Shell sessions: PTY plus terminal emulation (`alacritty_terminal`) |
 | `crates/render` | GPU drawing of rectangles and glyphs (`wgpu`, `cosmic-text`) |
 | `crates/config` | Config file and themes |
+| `crates/agents` | Agent detection, status reports and session state |
 | `crates/app` | Window, tabs, splits, keyboard and mouse |
 
 ## License

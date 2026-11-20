@@ -7,6 +7,7 @@
 //! knows nothing about windows or rendering.
 
 mod cwd;
+pub use cwd::controlling_tty;
 pub mod image;
 pub mod integration;
 mod io;
@@ -46,6 +47,8 @@ pub enum TermEvent {
     Title(String),
     ResetTitle,
     Bell,
+    /// The program asked for a desktop notification with this text.
+    Notify(String),
     /// The shell exited or the PTY closed.
     Exit,
     /// The shell has drawn a prompt and is waiting for input.
@@ -183,6 +186,9 @@ pub struct Terminal {
     /// Our own handle to the PTY, used to ask which process is in front.
     pty: File,
     shell_pid: u32,
+    /// Device number of the terminal the shell sees; identifies this pane
+    /// to processes running in it.
+    tty_device: Option<u64>,
     /// Where the session started; the answer of last resort for
     /// [`Terminal::working_directory`].
     start_directory: Option<PathBuf>,
@@ -230,12 +236,13 @@ impl Terminal {
         let pty = tty::new(&pty_options, options.size.window_size(), id)?;
         let pty_file = pty.file().try_clone()?;
         let shell_pid = pty.child().id();
+        let tty_device = cwd::tty_device(&pty_file);
 
         let (thread, io) = io::create(pty, term.clone(), listener, shared.clone())?;
         let _ = io_slot.set(io.clone());
         std::thread::Builder::new().name(format!("pty-{id}")).spawn(move || thread.run())?;
 
-        Ok(Terminal { id, term, io, pty: pty_file, shell_pid, start_directory, shared })
+        Ok(Terminal { id, term, io, pty: pty_file, shell_pid, tty_device, start_directory, shared })
     }
 
     pub fn id(&self) -> u64 {
@@ -281,6 +288,13 @@ impl Terminal {
             return (Vec::new(), Vec::new());
         }
         images.take()
+    }
+
+    /// Device number of this session's terminal. A process can look up its
+    /// own controlling terminal and compare, which tells it (and us) which
+    /// pane it runs in without relying on environment variables.
+    pub fn tty_device(&self) -> Option<u64> {
+        self.tty_device
     }
 
     /// What the shell has told us about itself (needs shell integration).

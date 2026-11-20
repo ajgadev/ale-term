@@ -69,6 +69,39 @@ fn reports_the_working_directory_and_follows_cd() {
 }
 
 #[test]
+fn a_process_in_the_pane_can_be_matched_to_it_by_terminal_device() {
+    let (terminal, _events) = spawn("/");
+    let device = terminal.tty_device().expect("pane has a terminal device");
+    // `stat -f %r` prints a file's device number; /dev/tty is whatever
+    // terminal the process is attached to. On macOS that reports the
+    // generic /dev/tty device, so ask for the real name first.
+    terminal.write(&b"stat -f 'dev=%r' $(tty)\n"[..]);
+    let expected = format!("dev={device}");
+    assert!(wait_for(|| screen_text(&terminal).contains(&expected)), "{expected}\n{}", screen_text(&terminal));
+}
+
+#[test]
+fn desktop_notification_requests_are_reported() {
+    let (tx, rx) = mpsc::channel();
+    let callback = Arc::new(move |_id, event| {
+        if let TermEvent::Notify(message) = event {
+            let _ = tx.send(message);
+        }
+    });
+    let options = SpawnOptions {
+        shell: Some(("/bin/sh".into(), vec![])),
+        working_directory: Some(PathBuf::from("/")),
+        scrollback: 100,
+        size: GridSize { columns: 40, lines: 10, cell_width: 8, cell_height: 16 },
+        integration: None,
+        env: Vec::new(),
+    };
+    let terminal = Terminal::spawn(3, options, callback).expect("spawn shell");
+    terminal.write(&b"printf '\\033]9;Approval needed\\007'\n"[..]);
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("Approval needed"));
+}
+
+#[test]
 fn resize_changes_the_grid_and_tells_the_shell() {
     let (terminal, _events) = spawn("/");
     terminal.resize(GridSize { columns: 60, lines: 20, cell_width: 8, cell_height: 16 });

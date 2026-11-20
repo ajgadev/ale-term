@@ -103,6 +103,7 @@ impl App {
         if let Some(workspace) = self.workspaces.iter_mut().find(|w| w.id == workspace_id) {
             workspace.last_tab = Some(tab_id);
         }
+        self.mark_seen();
         self.mark_dirty();
         self.redraw();
     }
@@ -329,12 +330,13 @@ impl App {
 
     // ---- Templates ----------------------------------------------------------
 
-    fn show_message(&mut self, title: &str, lines: Vec<String>) {
+    pub(super) fn show_message(&mut self, title: &str, lines: Vec<String>) {
         self.overlay = Overlay::Confirm(Box::new(Confirm {
             title: title.to_owned(),
             lines,
             hint: "Press Enter or Esc to close".into(),
             template: None,
+            install_hooks: false,
         }));
         self.redraw();
     }
@@ -434,6 +436,7 @@ impl App {
             lines,
             hint: "Enter: allow and run  ·  Esc: cancel".into(),
             template: Some((root, contents, tabs)),
+            install_hooks: false,
         }));
         self.redraw();
     }
@@ -441,6 +444,9 @@ impl App {
     /// The user pressed Enter on a confirmation.
     pub(super) fn confirm_accepted(&mut self) {
         let Overlay::Confirm(confirm) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
+        if confirm.install_hooks {
+            self.install_hooks();
+        }
         if let Some((root, contents, tabs)) = confirm.template {
             if let Some(dir) = &self.state_dir
                 && let Err(e) = self.approvals.approve(&root, &contents, dir)

@@ -275,6 +275,12 @@ fn handle_osc(
         }
         return;
     }
+    if payload.starts_with(b"9;") || payload.starts_with(b"777;") {
+        if let Some(message) = shell::parse_notification(payload) {
+            listener.emit(TermEvent::Notify(message));
+        }
+        return;
+    }
     if payload.starts_with(b"1337;") {
         return handle_iterm(payload, parser, term, shared);
     }

@@ -28,6 +28,15 @@ shell_integration = true
 # Memory budget for inline images, in megabytes.
 image_memory_mb = 128
 
+[agents]
+# Show the sidebar listing agents and shells at launch (toggle: Cmd+B).
+sidebar = true
+sidebar_width = 260.0
+# Play a sound when an agent needs you or finishes.
+sound = true
+# Show a macOS notification for the same, when the window is not in front.
+notifications = true
+
 [theme]
 # "auto" follows the macOS appearance; or force "dark" / "light".
 mode = "auto"

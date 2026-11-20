@@ -6,6 +6,10 @@
 //! title changes, exit) and config-file changes. Nothing is drawn unless one
 //! of those events asks for it, so an idle window uses no CPU.
 
+mod agents;
+mod frame;
+mod mouse;
+mod overlays;
 mod workspaces;
 
 use std::collections::HashMap;
@@ -46,6 +50,8 @@ use crate::layout::{Axis, Direction, Divider, Layout, Node, PaneId, Rect};
 /// Events sent to the main thread from background threads.
 pub enum UserEvent {
     Term(PaneId, TermEvent),
+    /// A status report from an agent's hook.
+    Agent(ale_agents::HookMessage),
     ConfigChanged,
 }
 
@@ -66,6 +72,8 @@ struct Pane {
     /// have the terminal echo it before the prompt appears.
     pending_input: Option<Vec<u8>>,
     created: Instant,
+    /// The coding agent running here, if any.
+    agent: Option<ale_agents::Session>,
 }
 
 struct Tab {
@@ -140,6 +148,16 @@ pub struct App {
     state_dir: Option<PathBuf>,
     /// When to write the session to disk next, if it changed.
     save_at: Option<Instant>,
+    /// Listens for status reports from agent hooks.
+    agent_server: Option<ale_agents::Server>,
+    sidebar: agents::SidebarState,
+    /// Claude Code's settings already contain our status hooks.
+    claude_hooks: bool,
+    /// The user said no to installing them.
+    hooks_declined: bool,
+    last_sound: Instant,
+    /// When the sidebar's elapsed times are next refreshed.
+    elapsed_refresh: Option<Instant>,
 
     modifiers: ModifiersState,
     mouse: Mouse,
@@ -163,6 +181,7 @@ impl App {
         }
         let palette = config.palette(true);
         let state_dir = workspace::state_dir();
+        let sidebar_visible = config.agents.sidebar;
         App {
             options,
             proxy,
@@ -181,6 +200,12 @@ impl App {
             approvals: state_dir.as_deref().map(Approvals::load).unwrap_or_default(),
             state_dir,
             save_at: None,
+            agent_server: None,
+            sidebar: agents::SidebarState { visible: sidebar_visible, ..Default::default() },
+            claude_hooks: false,
+            hooks_declined: false,
+            last_sound: Instant::now(),
+            elapsed_refresh: None,
             modifiers: ModifiersState::empty(),
             mouse: Mouse {
                 x: 0.0,
@@ -229,14 +254,18 @@ impl App {
         let fullscreen = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
         let label = TabBar::workspace_label(self.workspace_name());
         let label_width = self.renderer.as_ref().map_or(0.0, |r| r.text_width(&label));
-        TabBar::layout(self.visible_tabs().len(), self.window_size().0, self.scale(), fullscreen, label_width)
+        // With the sidebar open the window buttons sit over it, not the bar.
+        let lights = !fullscreen && !self.sidebar.visible;
+        let (count, width) = (self.visible_tabs().len(), self.window_size().0);
+        TabBar::layout(count, width, self.scale(), self.sidebar_width(), lights, label_width)
     }
 
     /// The area below the tab bar, where panes go.
     fn content_rect(&self) -> Rect {
         let (width, height) = self.window_size();
         let bar = TabBar::height(self.scale());
-        Rect::new(0.0, bar, width, (height - bar).max(0.0))
+        let left = self.sidebar_width();
+        Rect::new(left, bar, (width - left).max(0.0), (height - bar).max(0.0))
     }
 
     fn tab_layout(&self, tab: &Tab) -> Layout {
@@ -329,7 +358,7 @@ impl App {
             scrollback: terminal.scrollback,
             size: self.grid_size(rect),
             integration: self.integration.clone().filter(|_| terminal.shell_integration),
-            env: Vec::new(),
+            env: self.agent_env(id),
         };
         match Terminal::spawn(id, options, callback) {
             Ok(terminal) => {
@@ -343,6 +372,7 @@ impl App {
                     scroll_remainder: 0.0,
                     pending_input: None,
                     created: Instant::now(),
+                    agent: None,
                 };
                 self.panes.insert(id, pane);
                 Some(id)
@@ -452,6 +482,7 @@ impl App {
             tab.focused = id;
             // The tab is now "in" the newly focused pane's folder.
             self.sync_workspace(self.active);
+            self.mark_seen();
             self.redraw();
         }
     }
@@ -563,6 +594,14 @@ impl App {
             }
             Action::MoveTab => self.open_list(ListKind::MoveTab),
             Action::SetUpWorkspace => self.set_up_workspace(),
+            Action::ToggleSidebar => {
+                self.sidebar.visible = !self.sidebar.visible;
+                self.sidebar.searching = false;
+                self.relayout();
+            }
+            Action::NextAttention => self.next_attention(),
+            Action::SetUpHooks => self.offer_hooks(),
+            Action::RemoveHooks => self.remove_hooks(),
             Action::SplitRight => self.split(Axis::Horizontal),
             Action::SplitDown => self.split(Axis::Vertical),
             Action::NextTab => self.cycle_tab(1),
@@ -625,6 +664,9 @@ impl App {
         if self.overlay.is_open() {
             return self.overlay_key(event, action, event_loop);
         }
+        if self.sidebar_key(event) {
+            return;
+        }
         if let Some(action) = action {
             return self.perform(action, event_loop);
         }
@@ -647,655 +689,14 @@ impl App {
         }
     }
 
-    // ---- Overlays: command palette and search -----------------------------
-
-    /// Keyboard handling while the palette or search bar is open: keys edit
-    /// the query instead of going to the shell.
-    fn overlay_key(&mut self, event: &KeyEvent, action: Option<Action>, event_loop: &ActiveEventLoop) {
-        let shift = self.modifiers.shift_key();
-        let command = self.modifiers.super_key() || self.modifiers.control_key();
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => return self.close_overlay(),
-            Key::Named(NamedKey::Enter) => return self.overlay_confirm(shift, event_loop),
-            Key::Named(NamedKey::ArrowUp) => return self.overlay_move(-1),
-            Key::Named(NamedKey::ArrowDown) => return self.overlay_move(1),
-            Key::Named(NamedKey::Backspace) => {
-                if let Some(query) = self.overlay.query_mut() {
-                    if command {
-                        query.clear();
-                    } else {
-                        query.pop();
-                    }
-                }
-                return self.overlay_changed();
-            }
-            _ => {}
-        }
-        match action {
-            // A few commands make sense while an overlay is open.
-            Some(Action::Paste) => {
-                let text = get_clipboard().unwrap_or_default();
-                self.overlay_type(text.lines().next().unwrap_or(""));
-            }
-            Some(action @ (Action::FindNext | Action::FindPrevious | Action::Quit)) => {
-                self.perform(action, event_loop);
-            }
-            Some(Action::CommandPalette | Action::Find | Action::SwitchWorkspace) => self.close_overlay(),
-            Some(_) => {}
-            None if !command => {
-                if let Some(text) = event.text.as_deref() {
-                    self.overlay_type(text);
-                }
-            }
-            None => {}
-        }
-    }
-
-    fn overlay_type(&mut self, text: &str) {
-        if let Some(query) = self.overlay.query_mut() {
-            query.extend(text.chars().filter(|c| !c.is_control()));
-            self.overlay_changed();
-        }
-    }
-
-    /// The query was edited.
-    fn overlay_changed(&mut self) {
-        match &mut self.overlay {
-            Overlay::Palette { selected, .. } => *selected = 0,
-            Overlay::Search { query, .. } => {
-                self.last_search = query.clone();
-                self.search_step(SearchDirection::Left, false);
-            }
-            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
-        }
-        self.redraw();
-    }
-
-    fn overlay_move(&mut self, offset: isize) {
-        match &self.overlay {
-            Overlay::Palette { kind, query, selected } => {
-                let count = self.list_items(*kind, query).len() as isize;
-                let next = (*selected as isize + offset).rem_euclid(count.max(1)) as usize;
-                if let Overlay::Palette { selected, .. } = &mut self.overlay {
-                    *selected = next;
-                }
-                self.redraw();
-            }
-            // Up goes to older matches, down to newer ones.
-            Overlay::Search { .. } => {
-                let direction = if offset < 0 { SearchDirection::Left } else { SearchDirection::Right };
-                self.search_step(direction, true);
-            }
-            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
-        }
-    }
-
-    fn overlay_confirm(&mut self, shift: bool, event_loop: &ActiveEventLoop) {
-        match &self.overlay {
-            Overlay::Palette { kind, query, selected } => {
-                let chosen = self.list_items(*kind, query).get(*selected).map(|item| item.choice);
-                self.close_overlay();
-                self.run_choice(chosen, event_loop);
-            }
-            Overlay::Input { kind, query } => {
-                let (kind, text) = (*kind, query.clone());
-                self.close_overlay();
-                self.submit_input(kind, &text);
-            }
-            Overlay::Confirm(_) => self.confirm_accepted(),
-            Overlay::Search { .. } => {
-                let direction = if shift { SearchDirection::Right } else { SearchDirection::Left };
-                self.search_step(direction, true);
-            }
-            Overlay::None => {}
-        }
-    }
-
-    fn run_choice(&mut self, choice: Option<Choice>, event_loop: &ActiveEventLoop) {
-        match choice {
-            Some(Choice::Run(action)) => self.perform(action, event_loop),
-            Some(choice) => self.choose(choice),
-            None => {}
-        }
-    }
-
-    fn close_overlay(&mut self) {
-        self.overlay = Overlay::None;
-        self.redraw();
-    }
-
-    fn open_search(&mut self) {
-        let Some(pane) = self.focused_pane_id() else { return };
-        // Start from the selected text when there is some on one line.
-        let selected = self.focused_pane().and_then(|p| p.terminal.lock().selection_to_string());
-        let query = match selected {
-            Some(text) if !text.trim().is_empty() && !text.trim().contains('\n') => text.trim().to_owned(),
-            _ => self.last_search.clone(),
-        };
-        self.last_search = query.clone();
-        self.overlay = Overlay::Search { pane, query, failed: false };
-        self.search_step(SearchDirection::Left, false);
-    }
-
-    /// Finds a match for the current search text and selects it.
-    ///
-    /// `advance` moves on from the current match (Find Next/Previous);
-    /// without it the search restarts from the current match, which is what
-    /// typing more letters should do. Left means towards older output.
-    fn search_step(&mut self, direction: SearchDirection, advance: bool) {
-        let pane_id = match &self.overlay {
-            Overlay::Search { pane, .. } => Some(*pane),
-            _ => self.focused_pane_id(),
-        };
-        let query = self.last_search.clone();
-        let Some(pane) = pane_id.and_then(|id| self.panes.get(&id)) else { return };
-
-        let mut found = false;
-        if !query.is_empty()
-            && let Ok(mut regex) = RegexSearch::new(&overlay::regex_escape(&query))
-        {
-            let mut term = pane.terminal.lock();
-            let current = term.selection.as_ref().and_then(|s| s.to_range(&*term));
-            let bottom = Point::new(term.bottommost_line(), term.last_column());
-            let top = Point::new(term.topmost_line(), Column(0));
-            let origin = match (current, direction, advance) {
-                (Some(range), SearchDirection::Left, true) => range.start.sub(&*term, Boundary::None, 1),
-                (Some(range), SearchDirection::Right, true) => range.end.add(&*term, Boundary::None, 1),
-                (Some(range), _, false) => range.end,
-                (None, ..) => Point::new(
-                    Line(term.screen_lines() as i32 - 1 - term.grid().display_offset() as i32),
-                    term.last_column(),
-                ),
-            };
-            let side = if direction == SearchDirection::Left { Side::Right } else { Side::Left };
-            // Search from the origin; when nothing is left that way, wrap
-            // around to the other end.
-            let wrap_origin = if direction == SearchDirection::Left { bottom } else { top };
-            let hit = term
-                .search_next(&mut regex, origin, direction, side, None)
-                .or_else(|| term.search_next(&mut regex, wrap_origin, direction, side, None));
-            if let Some(hit) = hit {
-                let mut selection = Selection::new(SelectionType::Simple, *hit.start(), Side::Left);
-                selection.update(*hit.end(), Side::Right);
-                term.selection = Some(selection);
-                term.scroll_to_point(*hit.start());
-                found = true;
-            } else {
-                term.selection = None;
-            }
-        }
-        if let Overlay::Search { failed, query, .. } = &mut self.overlay {
-            *failed = !found && !query.is_empty();
-        }
-        self.redraw();
-    }
-
-    /// Scrolls so the previous (or next) shell prompt is at the top of the
-    /// pane. Needs shell integration, which tags prompt cells.
-    fn jump_to_prompt(&mut self, previous: bool) {
-        let Some(pane) = self.focused_pane() else { return };
-        let mut term = pane.terminal.lock();
-        let offset = term.grid().display_offset() as i32;
-        let (first, last) = (term.topmost_line().0, term.bottommost_line().0);
-        let tagged = |line: i32| {
-            term.grid()[Line(line)][Column(0)]
-                .hyperlink()
-                .is_some_and(|link| link.uri().starts_with(ale_core::PROMPT_TAG))
-        };
-        // A prompt can span several lines; its start is the first of them.
-        let is_start = |line: i32| tagged(line) && (line == first || !tagged(line - 1));
-        let top = -offset;
-        let target = if previous {
-            (first..top).rev().find(|line| is_start(*line))
-        } else {
-            (top + 1..=last).find(|line| is_start(*line))
-        };
-        if let Some(line) = target {
-            term.scroll_display(Scroll::Delta(-line - offset));
-        } else if !previous {
-            term.scroll_display(Scroll::Bottom);
-        }
-        drop(term);
-        self.redraw();
-    }
-
-    /// Sends typed bytes to the focused pane. Typing snaps the view back to
-    /// the bottom and drops the selection, as in other terminals.
-    fn send_input(&mut self, bytes: Vec<u8>) {
-        let Some(pane) = self.focused_pane() else { return };
-        {
-            let mut term = pane.terminal.lock();
-            term.scroll_display(Scroll::Bottom);
-            term.selection = None;
-        }
-        pane.terminal.write(bytes);
-        self.redraw();
-    }
-
-    fn copy(&mut self) {
-        let Some(pane) = self.focused_pane() else { return };
-        let text = pane.terminal.lock().selection_to_string();
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            set_clipboard(text);
-        }
-    }
-
-    fn paste(&mut self) {
-        let Some(pane) = self.focused_pane() else { return };
-        let Some(text) = get_clipboard() else { return };
-        let mode = *pane.terminal.lock().mode();
-        self.send_input(input::encode_paste(&text, mode));
-    }
-
-    /// Cmd+K: forget the scrollback and ask the shell to redraw its prompt.
-    fn clear_history(&mut self) {
-        let Some(pane) = self.focused_pane() else { return };
-        pane.terminal.lock().grid_mut().clear_history();
-        pane.terminal.write(&b"\x0c"[..]);
-        self.redraw();
-    }
-
-    // ---- Mouse ------------------------------------------------------------
-
-    /// Whether the program in `pane` asked to receive mouse events itself.
-    /// Holding Shift always gives the mouse back to the terminal.
-    fn mouse_reporting(&self, pane: PaneId) -> Option<TermMode> {
-        if self.modifiers.shift_key() {
-            return None;
-        }
-        let mode = *self.panes.get(&pane)?.terminal.lock().mode();
-        mode.intersects(TermMode::MOUSE_MODE).then_some(mode)
-    }
-
-    fn report_mouse(&mut self, pane: PaneId, rect: Rect, action: MouseAction, code: u8, mode: TermMode) {
-        let (column, line, _) = self.cell_at(pane, rect, self.mouse.x, self.mouse.y);
-        if action == MouseAction::Motion {
-            if self.mouse.last_cell == Some((pane, column, line)) {
-                return;
-            }
-            self.mouse.last_cell = Some((pane, column, line));
-        }
-        let bytes = input::encode_mouse(action, code, column, line, self.modifiers, mode);
-        if let (Some(bytes), Some(pane)) = (bytes, self.panes.get(&pane)) {
-            pane.terminal.write(bytes);
-        }
-    }
-
-    fn divider_at(&self, layout: &Layout, x: f32, y: f32) -> Option<Divider> {
-        let grab = 4.0 * self.scale();
-        layout.dividers.iter().copied().find(|d| d.rect.inflate(grab).contains(x, y))
-    }
-
-    fn mouse_button(&mut self, state: ElementState, mouse_button: MouseButton, event_loop: &ActiveEventLoop) {
-        let (x, y) = (self.mouse.x, self.mouse.y);
-        let code = match mouse_button {
-            MouseButton::Left => button::LEFT,
-            MouseButton::Middle => button::MIDDLE,
-            MouseButton::Right => button::RIGHT,
-            _ => return,
-        };
-
-        if state == ElementState::Released {
-            if mouse_button == MouseButton::Left {
-                if let Drag::Reported(pane) = self.mouse.drag
-                    && let Some(rect) = self.active_layout().rect_of(pane)
-                    && let Some(mode) = self.mouse_reporting(pane)
-                {
-                    self.report_mouse(pane, rect, MouseAction::Release, code, mode);
-                }
-                self.mouse.drag = Drag::None;
-            } else if let Some(pane) = self.active_layout().pane_at(x, y)
-                && let Some(rect) = self.active_layout().rect_of(pane)
-                && let Some(mode) = self.mouse_reporting(pane)
-            {
-                self.report_mouse(pane, rect, MouseAction::Release, code, mode);
-            }
-            return;
-        }
-
-        // An open palette takes every click: on a row runs it, elsewhere
-        // closes the palette.
-        if self.overlay.is_modal() {
-            let mut chosen = None;
-            if let Overlay::Palette { kind, query, selected } = &self.overlay {
-                let items = self.list_items(*kind, query);
-                chosen = self
-                    .palette_layout(items.len(), *selected)
-                    .and_then(|layout| layout.row_at(x, y))
-                    .and_then(|index| items.get(index))
-                    .map(|item| item.choice);
-            }
-            self.close_overlay();
-            if mouse_button == MouseButton::Left {
-                self.run_choice(chosen, event_loop);
-            }
-            return;
-        }
-
-        // Cmd+click opens the link under the mouse.
-        if mouse_button == MouseButton::Left
-            && self.modifiers.super_key()
-            && let Some(link) = &self.hover_link
-        {
-            open_target(&link.target);
-            return;
-        }
-
-        // Tab bar.
-        if let Some(hit) = self.tab_bar().hit(x, y) {
-            match (hit, mouse_button) {
-                (TabBarHit::Tab(index), MouseButton::Left) => self.select_tab(index),
-                (TabBarHit::Tab(index), MouseButton::Middle) => {
-                    if let Some(&tab) = self.visible_tabs().get(index)
-                        && self.close_tab(tab)
-                    {
-                        event_loop.exit();
-                    }
-                }
-                (TabBarHit::Workspace, MouseButton::Left) => self.open_list(ListKind::Workspaces),
-                (TabBarHit::NewTab, MouseButton::Left) => self.new_tab(None),
-                (TabBarHit::Empty, MouseButton::Left) => {
-                    let clicks = self.register_click();
-                    if let Some(window) = &self.window {
-                        if clicks == 2 {
-                            window.set_maximized(!window.is_maximized());
-                        } else {
-                            let _ = window.drag_window();
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        let layout = self.active_layout();
-        if mouse_button == MouseButton::Left
-            && let Some(divider) = self.divider_at(&layout, x, y)
-        {
-            self.mouse.drag = Drag::Divider(divider);
-            return;
-        }
-        let Some(pane) = layout.pane_at(x, y) else { return };
-        let Some(rect) = layout.rect_of(pane) else { return };
-        self.focus_pane(pane);
-
-        if let Some(mode) = self.mouse_reporting(pane) {
-            self.mouse.last_cell = None;
-            self.report_mouse(pane, rect, MouseAction::Press, code, mode);
-            if mouse_button == MouseButton::Left {
-                self.mouse.drag = Drag::Reported(pane);
-            }
-            return;
-        }
-        if mouse_button != MouseButton::Left {
-            return;
-        }
-
-        // Start a selection: single click selects by character, double by
-        // word, triple by line.
-        let kind = match self.register_click() {
-            1 => SelectionType::Simple,
-            2 => SelectionType::Semantic,
-            _ => SelectionType::Lines,
-        };
-        let (column, line, side) = self.cell_at(pane, rect, x, y);
-        if let Some(pane_state) = self.panes.get(&pane) {
-            let mut term = pane_state.terminal.lock();
-            let point = term::viewport_to_point(term.grid().display_offset(), Point::new(line, Column(column)));
-            term.selection = Some(Selection::new(kind, point, side));
-        }
-        self.mouse.drag = Drag::Select(pane);
-        self.redraw();
-    }
-
-    /// Counts consecutive clicks; returns 1, 2 or 3.
-    fn register_click(&mut self) -> u8 {
-        let now = Instant::now();
-        let quick = now.duration_since(self.mouse.last_click) < Duration::from_millis(400);
-        self.mouse.click_count = if quick { self.mouse.click_count % 3 + 1 } else { 1 };
-        self.mouse.last_click = now;
-        self.mouse.click_count
-    }
-
-    fn mouse_moved(&mut self, position: PhysicalPosition<f64>) {
-        self.mouse.x = position.x as f32;
-        self.mouse.y = position.y as f32;
-        let (x, y) = (self.mouse.x, self.mouse.y);
-        let layout = self.active_layout();
-
-        match self.mouse.drag {
-            Drag::Divider(divider) => {
-                let area = divider.parent;
-                let ratio = match divider.axis {
-                    Axis::Horizontal => (x - area.x) / area.w.max(1.0),
-                    Axis::Vertical => (y - area.y) / area.h.max(1.0),
-                };
-                if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.root.set_ratio(divider.index, ratio);
-                }
-                self.relayout();
-            }
-            Drag::Select(pane) => {
-                if let Some(rect) = layout.rect_of(pane) {
-                    let (column, line, side) = self.cell_at(pane, rect, x, y);
-                    if let Some(pane) = self.panes.get(&pane) {
-                        let mut term = pane.terminal.lock();
-                        let offset = term.grid().display_offset();
-                        let point = term::viewport_to_point(offset, Point::new(line, Column(column)));
-                        if let Some(selection) = term.selection.as_mut() {
-                            selection.update(point, side);
-                        }
-                    }
-                    self.redraw();
-                }
-            }
-            Drag::Reported(pane) => {
-                if let Some(rect) = layout.rect_of(pane)
-                    && let Some(mode) = self.mouse_reporting(pane)
-                    && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
-                {
-                    self.report_mouse(pane, rect, MouseAction::Motion, button::LEFT, mode);
-                }
-            }
-            Drag::None => {
-                if let Some(pane) = layout.pane_at(x, y)
-                    && let Some(rect) = layout.rect_of(pane)
-                    && let Some(mode) = self.mouse_reporting(pane)
-                    && mode.contains(TermMode::MOUSE_MOTION)
-                {
-                    self.report_mouse(pane, rect, MouseAction::Motion, button::NONE, mode);
-                }
-            }
-        }
-
-        self.update_hover_link();
-
-        // Show what a click would do.
-        let icon = if self.tab_bar().bar.contains(x, y) || self.overlay.is_modal() {
-            CursorIcon::Default
-        } else if self.hover_link.is_some() {
-            CursorIcon::Pointer
-        } else {
-            match self.divider_at(&layout, x, y) {
-                Some(Divider { axis: Axis::Horizontal, .. }) => CursorIcon::ColResize,
-                Some(Divider { axis: Axis::Vertical, .. }) => CursorIcon::RowResize,
-                None => CursorIcon::Text,
-            }
-        };
-        if let Some(window) = &self.window {
-            window.set_cursor(icon);
-        }
-    }
-
-    fn palette_layout(&self, count: usize, selected: usize) -> Option<PaletteLayout> {
-        let metrics = self.renderer.as_ref()?.metrics();
-        let cell = (metrics.width, metrics.height);
-        Some(PaletteLayout::new(self.window_size(), cell, self.scale(), count, selected))
-    }
-
-    /// Recomputes which link (if any) is under the mouse. Links are only
-    /// active while Cmd is held, so normal clicks and selection are never
-    /// affected.
-    fn update_hover_link(&mut self) {
-        let (x, y) = (self.mouse.x, self.mouse.y);
-        let mut link = None;
-        if self.modifiers.super_key() && !self.overlay.is_open() && matches!(self.mouse.drag, Drag::None) {
-            let layout = self.active_layout();
-            if let Some(pane) = layout.pane_at(x, y)
-                && let Some(rect) = layout.rect_of(pane)
-            {
-                link = self.link_at(pane, rect, x, y);
-            }
-        }
-        let changed = match (&link, &self.hover_link) {
-            (None, None) => false,
-            (Some(a), Some(b)) => a.pane != b.pane || a.start != b.start || a.end != b.end,
-            _ => true,
-        };
-        self.hover_link = link;
-        if changed {
-            self.redraw();
-        }
-    }
-
-    /// Finds a link at a window position: an explicit hyperlink set by the
-    /// program, a web address, or a path to an existing file.
-    fn link_at(&self, pane_id: PaneId, rect: Rect, x: f32, y: f32) -> Option<HoverLink> {
-        let pane = self.panes.get(&pane_id)?;
-        let (column, line, _) = self.cell_at(pane_id, rect, x, y);
-        let term = pane.terminal.lock();
-        let point = term::viewport_to_point(term.grid().display_offset(), Point::new(line, Column(column)));
-        let grid = term.grid();
-        let last_column = term.last_column();
-        let wraps = |line: Line| grid[line][last_column].flags.contains(Flags::WRAPLINE);
-
-        // Explicit hyperlink (OSC 8): covers the neighbouring cells that
-        // carry the same address.
-        if let Some(hyperlink) = grid[point.line][point.column].hyperlink() {
-            let uri = hyperlink.uri();
-            let allowed = ["https://", "http://", "file://", "mailto:"].iter().any(|s| uri.starts_with(s));
-            if !allowed {
-                return None;
-            }
-            let same = |column: Column| {
-                grid[point.line][column].hyperlink().is_some_and(|other| other.uri() == uri)
-            };
-            let (mut start, mut end) = (point.column, point.column);
-            while start.0 > 0 && same(start - 1) {
-                start -= 1;
-            }
-            while end < last_column && same(end + 1) {
-                end += 1;
-            }
-            return Some(HoverLink {
-                pane: pane_id,
-                start: Point::new(point.line, start),
-                end: Point::new(point.line, end),
-                target: Target::Url(uri.to_owned()),
-            });
-        }
-
-        // Otherwise look at the text. A long address may be wrapped over
-        // several rows, so gather the whole logical line first.
-        let mut first = point.line;
-        while first > term.topmost_line() && point.line - first < 20 && wraps(first - 1) {
-            first -= 1;
-        }
-        let mut last = point.line;
-        while last < term.bottommost_line() && last - point.line < 20 && wraps(last) {
-            last += 1;
-        }
-        let mut chars = Vec::new();
-        let mut points = Vec::new();
-        let mut at = None;
-        let mut current = first;
-        while current <= last {
-            for column in 0..term.columns() {
-                let cell = &grid[current][Column(column)];
-                let cell_point = Point::new(current, Column(column));
-                if cell_point == point {
-                    at = Some(chars.len());
-                }
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                chars.push(if cell.c == '\0' { ' ' } else { cell.c });
-                points.push(cell_point);
-            }
-            current += 1;
-        }
-        let at = at?.min(chars.len().checked_sub(1)?);
-        drop(term);
-
-        let found = links::url_at(&chars, at).or_else(|| {
-            let cwd = pane.terminal.working_directory();
-            links::path_at(&chars, at, cwd.as_deref(), |path| path.exists())
-        })?;
-        Some(HoverLink {
-            pane: pane_id,
-            start: points[found.start],
-            end: points[found.end - 1],
-            target: found.target,
-        })
-    }
-
-    fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        let (x, y) = (self.mouse.x, self.mouse.y);
-        let layout = self.active_layout();
-        let Some(id) = layout.pane_at(x, y) else { return };
-        let Some(rect) = layout.rect_of(id) else { return };
-        let Some(cell_height) = self.renderer.as_ref().map(|r| r.metrics().height) else { return };
-        let multiplier = self.config.terminal.scroll_multiplier;
-        let Some(pane) = self.panes.get_mut(&id) else { return };
-
-        // Turn the wheel or trackpad movement into whole lines, keeping the
-        // remainder so slow trackpad scrolling still adds up.
-        let pixels = match delta {
-            MouseScrollDelta::LineDelta(_, lines) => lines * cell_height * multiplier,
-            MouseScrollDelta::PixelDelta(position) => position.y as f32,
-        };
-        pane.scroll_remainder += pixels;
-        let lines = (pane.scroll_remainder / cell_height).trunc();
-        pane.scroll_remainder -= lines * cell_height;
-        let lines = lines as i32;
-        if lines == 0 {
-            return;
-        }
-
-        let mode = *pane.terminal.lock().mode();
-        if let Some(mode) = self.mouse_reporting(id) {
-            // The program handles scrolling itself.
-            let code = if lines > 0 { button::WHEEL_UP } else { button::WHEEL_DOWN };
-            for _ in 0..lines.unsigned_abs().min(20) {
-                self.mouse.last_cell = None;
-                self.report_mouse(id, rect, MouseAction::Press, code, mode);
-            }
-        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
-            && !self.modifiers.shift_key()
-        {
-            // Full-screen programs without mouse support (less, man) scroll
-            // with the arrow keys.
-            let key = if lines > 0 { b'A' } else { b'B' };
-            let prefix = if mode.contains(TermMode::APP_CURSOR) { b'O' } else { b'[' };
-            let mut bytes = Vec::new();
-            for _ in 0..lines.unsigned_abs().min(100) {
-                bytes.extend_from_slice(&[0x1b, prefix, key]);
-            }
-            if let Some(pane) = self.panes.get(&id) {
-                pane.terminal.write(bytes);
-            }
-        } else if let Some(pane) = self.panes.get(&id) {
-            pane.terminal.lock().scroll_display(Scroll::Delta(lines));
-            self.redraw();
-        }
-    }
-
     // ---- Terminal events --------------------------------------------------
 
     fn term_event(&mut self, id: PaneId, event: TermEvent, event_loop: &ActiveEventLoop) {
         match event {
-            TermEvent::Wakeup => self.redraw(),
+            TermEvent::Wakeup => {
+                self.agent_output(id);
+                self.redraw();
+            }
             TermEvent::Title(title) => {
                 if let Some(pane) = self.panes.get_mut(&id) {
                     pane.title = Some(title).filter(|t| !t.trim().is_empty());
@@ -1341,215 +742,17 @@ impl App {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.focused == id) {
                     self.sync_workspace(index);
                 }
+                // A command started or ended: an agent may have too.
+                self.sync_agent(id);
                 self.mark_dirty();
                 self.redraw();
             }
             TermEvent::PromptReady => self.flush_pending_input(id),
-            TermEvent::Bell => {}
+            TermEvent::Bell => self.agent_attention(id, None),
+            TermEvent::Notify(message) => self.agent_attention(id, Some(message)),
         }
     }
 
-    // ---- Drawing ----------------------------------------------------------
-
-    /// Queues text to be typed into a pane when its shell is ready.
-    fn type_when_ready(&mut self, id: PaneId, bytes: Vec<u8>) {
-        if let Some(pane) = self.panes.get_mut(&id) {
-            pane.pending_input = Some(bytes);
-        }
-    }
-
-    fn flush_pending_input(&mut self, id: PaneId) {
-        if let Some(pane) = self.panes.get_mut(&id)
-            && let Some(bytes) = pane.pending_input.take()
-        {
-            pane.terminal.write(bytes);
-        }
-    }
-
-    /// Shells without integration never announce their prompt; give them a
-    /// few seconds to start and then type anyway.
-    fn flush_overdue_input(&mut self) {
-        let overdue: Vec<PaneId> = self
-            .panes
-            .iter()
-            .filter(|(_, pane)| pane.pending_input.is_some() && pane.created.elapsed() > Duration::from_secs(3))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in overdue {
-            self.flush_pending_input(id);
-        }
-    }
-
-    /// Refreshes the folder-name titles of panes without shell integration.
-    /// At most once a second per pane, since it asks the OS each time.
-    /// (Integrated shells report their folder themselves.)
-    fn refresh_fallback_titles(&mut self) {
-        let mut stale = Vec::new();
-        for tab in &self.tabs {
-            let Some(pane) = self.panes.get_mut(&tab.focused) else { continue };
-            if pane.fallback_checked.elapsed() < Duration::from_secs(1) {
-                continue;
-            }
-            pane.fallback_checked = Instant::now();
-            if let Some(directory) = pane.terminal.working_directory() {
-                pane.fallback_title = folder_name(&directory);
-            }
-            if !pane.terminal.shell().integrated {
-                stale.push(tab.id);
-            }
-        }
-        // Without shell integration nothing tells us when the folder
-        // changes, so regroup these tabs on the same slow schedule.
-        for id in stale {
-            if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
-                self.sync_workspace(index);
-            }
-        }
-    }
-
-    /// The label for a tab, from its focused pane.
-    ///
-    /// With shell integration we know what is going on: at a prompt the tab
-    /// shows the folder; while a command runs it shows the title that
-    /// program set, or else the command itself. Without integration we can
-    /// only show the last title set, or the folder.
-    fn tab_title(&self, tab: &Tab) -> String {
-        if let Some(title) = &tab.custom_title {
-            return title.clone();
-        }
-        let Some(pane) = self.panes.get(&tab.focused) else { return String::new() };
-        let shell = pane.terminal.shell();
-        if !shell.integrated {
-            return pane.title.clone().unwrap_or_else(|| pane.fallback_title.clone());
-        }
-        let folder = shell.cwd.as_deref().map(folder_name).unwrap_or_else(|| pane.fallback_title.clone());
-        let Some(command) = shell.command else { return folder };
-        let set_by_program =
-            shell.command_started.is_some_and(|started| pane.title_set > started);
-        match (&pane.title, set_by_program) {
-            (Some(title), true) => title.clone(),
-            _ if command.is_empty() => folder,
-            _ => format!("{command} — {folder}"),
-        }
-    }
-
-    /// Describes the whole window to the renderer.
-    fn build_frame(&mut self) {
-        self.refresh_fallback_titles();
-        self.flush_overdue_input();
-        let layout = self.active_layout();
-        let tab_bar = self.tab_bar();
-        let visible = self.visible_tabs();
-        let titles: Vec<String> = visible.iter().map(|i| self.tab_title(&self.tabs[*i])).collect();
-        let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
-        let workspace_name = self.workspace_name().to_owned();
-        // Rows of an open list overlay, computed before the renderer is
-        // borrowed.
-        let list_rows: Vec<(String, String)> = match &self.overlay {
-            Overlay::Palette { kind, query, .. } => {
-                self.list_items(*kind, query).into_iter().map(|item| (item.title, item.detail)).collect()
-            }
-            _ => Vec::new(),
-        };
-        let focused_pane = self.focused_pane_id();
-        let scale = self.scale();
-        let padding = self.padding();
-        let window = self.window_size();
-        let Some(renderer) = self.renderer.as_mut() else { return };
-        let palette = &self.palette;
-        let metrics = renderer.metrics();
-
-        // Move newly decoded images to the GPU (for every pane, so images
-        // printed in background tabs do not pile up in memory), then keep
-        // total image memory within the configured budget.
-        for (id, pane) in &self.panes {
-            let (added, removed) = pane.terminal.take_images();
-            for image in added {
-                renderer.upload_image(image_key(*id, image.id), image.width, image.height, &image.rgba);
-            }
-            for image_id in removed {
-                renderer.remove_image(image_key(*id, image_id));
-            }
-        }
-        renderer.limit_image_memory(self.config.terminal.image_memory_mb as usize * 1024 * 1024);
-
-        renderer.begin(color(palette.background));
-        for (id, rect) in &layout.panes {
-            let Some(pane) = self.panes.get(id) else { continue };
-            let is_focused = Some(*id) == focused_pane;
-            let link = self.hover_link.as_ref().filter(|l| l.pane == *id).map(|l| (l.start, l.end));
-            let style =
-                PaneStyle {
-                palette,
-                metrics,
-                padding,
-                focused: is_focused && self.focused,
-                link,
-                ligatures: self.config.font.ligatures,
-                image_key_base: image_key(*id, 0),
-            };
-            draw::pane(renderer, &pane.terminal.lock(), *rect, &style);
-            if !is_focused {
-                // Fade panes that are not receiving input.
-                let [r, g, b, _] = color(palette.background);
-                renderer.rect(rect.x, rect.y, rect.w, rect.h, [r, g, b, 70]);
-            }
-        }
-        for divider in &layout.dividers {
-            let Rect { x, y, w, h } = divider.rect;
-            renderer.rect(x, y, w, h, color(palette.border));
-        }
-        tab_bar.draw(renderer, &workspace_name, &titles, active_position, scale, palette);
-
-        match &self.overlay {
-            Overlay::Palette { kind, query, selected } => {
-                let placeholder = kind.placeholder();
-                overlay::draw_palette(renderer, placeholder, query, *selected, &list_rows, window, scale, palette);
-            }
-            Overlay::Input { kind, query } => {
-                overlay::draw_palette(renderer, kind.placeholder(), query, 0, &[], window, scale, palette);
-            }
-            Overlay::Confirm(confirm) => overlay::draw_confirm(renderer, confirm, window, scale, palette),
-            Overlay::Search { pane, query, failed } => {
-                if let Some(rect) = layout.rect_of(*pane) {
-                    overlay::draw_search(renderer, query, *failed, rect, scale, palette);
-                }
-            }
-            Overlay::None => {}
-        }
-    }
-
-    fn draw(&mut self) {
-        self.build_frame();
-        let again = self.renderer.as_mut().is_some_and(|r| r.present());
-        if !self.first_frame_logged {
-            self.first_frame_logged = true;
-            log::info!("first frame {:?} after launch", self.launched.elapsed());
-        }
-        if again {
-            self.redraw();
-        }
-    }
-
-    /// When scripted test steps run: 1.5 seconds after launch (once the
-    /// first shell is up), but always before the snapshot.
-    fn script_time(&self, snapshot_at: Instant) -> Instant {
-        (self.launched + Duration::from_millis(1500)).min(snapshot_at - Duration::from_millis(600))
-    }
-
-    /// Saves a picture of the window (for automated visual checks).
-    fn take_snapshot(&mut self) {
-        let Some(path) = self.options.snapshot.clone() else { return };
-        // Twice: the first pass may fill the glyph atlas and ask for a redo.
-        self.build_frame();
-        self.build_frame();
-        if let Some(renderer) = self.renderer.as_mut() {
-            let (width, height, rgba) = renderer.capture();
-            if let Err(e) = write_bmp(&path, width, height, &rgba) {
-                eprintln!("ale-term: cannot write {}: {e}", path.display());
-            }
-        }
-    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -1610,6 +813,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        self.start_agent_server();
+
         // Pick up where the last run left off, unless asked for a specific
         // folder.
         let restored = self.config.window.restore
@@ -1645,6 +850,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Term(id, event) => self.term_event(id, event, event_loop),
             UserEvent::ConfigChanged => self.reload_config(),
+            UserEvent::Agent(message) => self.hook_message(message),
         }
     }
 
@@ -1662,6 +868,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ThemeChanged(_) => self.apply_theme(),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                self.mark_seen();
                 // Tell programs that asked to know (e.g. editors that
                 // auto-save or dim on focus loss).
                 if let Some(pane) = self.focused_pane()
@@ -1700,15 +907,24 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Everything below may ask to be woken at some time; we sleep until
+        // the earliest, or until the next event if nobody asks.
+        let mut wake: Option<Instant> = None;
+        let mut wake_at = |at: Instant| wake = Some(wake.map_or(at, |w: Instant| w.min(at)));
+
         // Write the session a moment after the last change.
         if let Some(at) = self.save_at {
             if Instant::now() >= at {
                 self.save_session();
-            } else if self.snapshot_at.is_none() {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            } else {
+                wake_at(at);
             }
-        } else if self.snapshot_at.is_none() {
-            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+        if let Some(at) = self.tick_agents() {
+            wake_at(at);
+        }
+        if let Some(at) = self.refresh_elapsed() {
+            wake_at(at);
         }
 
         // Test hook: run scripted steps shortly before the snapshot.
@@ -1733,10 +949,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.take_snapshot();
                 event_loop.exit();
             } else {
-                let next = if self.options.script.is_empty() { at } else { self.script_time(at) };
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+                wake_at(if self.options.script.is_empty() { at } else { self.script_time(at) });
             }
         }
+        event_loop.set_control_flow(match wake {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 }
 

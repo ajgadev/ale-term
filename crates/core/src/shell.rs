@@ -74,6 +74,29 @@ pub fn parse_cwd(payload: &[u8]) -> Option<PathBuf> {
     String::from_utf8(percent_decode(path)).ok().map(PathBuf::from)
 }
 
+/// Parses a desktop-notification request: `9;message` (iTerm2 style) or
+/// `777;notify;title;message` (rxvt style). Programs send these to get the
+/// user's attention, typically "I need you" or "I am done".
+///
+/// `9;4;...` is something else that shares the number (a progress report),
+/// and is ignored.
+pub fn parse_notification(payload: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let message = if let Some(rest) = text.strip_prefix("777;notify;") {
+        // "title;body": show both.
+        rest.replacen(';', ": ", 1)
+    } else {
+        let rest = text.strip_prefix("9;")?;
+        if rest == "4" || rest.starts_with("4;") {
+            return None;
+        }
+        rest.to_owned()
+    };
+    // Keep it to one tidy line; it is shown in the UI.
+    let clean: String = message.chars().filter(|c| !c.is_control()).take(200).collect();
+    Some(clean.trim().to_owned())
+}
+
 /// Decodes `%XX` escapes; anything malformed is kept as-is.
 pub fn percent_decode(input: &[u8]) -> Vec<u8> {
     let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
@@ -119,6 +142,17 @@ mod tests {
         assert_eq!(parse_mark(b"133;D;130"), Some(Mark::CommandEnd(Some(130))));
         assert_eq!(parse_mark(b"133;D"), Some(Mark::CommandEnd(None)));
         assert_eq!(parse_mark(b"133;Z"), None);
+    }
+
+    #[test]
+    fn parses_notifications() {
+        assert_eq!(parse_notification(b"9;Build finished"), Some("Build finished".into()));
+        assert_eq!(parse_notification(b"777;notify;Codex;Approval needed"), Some("Codex: Approval needed".into()));
+        // Progress reports are not notifications.
+        assert_eq!(parse_notification(b"9;4;1;50"), None);
+        assert_eq!(parse_notification(b"9;4"), None);
+        assert_eq!(parse_notification(b"7;file:///x"), None);
+        assert_eq!(parse_notification(b"9;a\x07b\nc"), Some("abc".into()));
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub struct Config {
     pub window: WindowConfig,
     pub terminal: TerminalConfig,
     pub theme: ThemeConfig,
+    pub agents: AgentsConfig,
     /// Workspace templates: the tabs to open for a project.
     #[serde(rename = "workspace")]
     pub workspaces: Vec<WorkspaceTemplate>,
@@ -164,6 +165,27 @@ impl Default for TerminalConfig {
     }
 }
 
+/// Settings for coding agents: the sidebar and alerts.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentsConfig {
+    /// Show the sidebar when the app starts.
+    pub sidebar: bool,
+    /// Sidebar width in points.
+    pub sidebar_width: f32,
+    /// Play a sound when an agent needs you or finishes.
+    pub sound: bool,
+    /// Show a macOS notification when that happens while the window is not
+    /// in front.
+    pub notifications: bool,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self { sidebar: true, sidebar_width: 260.0, sound: true, notifications: true }
+    }
+}
+
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
@@ -214,6 +236,7 @@ impl Config {
         self.window.width = self.window.width.max(300.0);
         self.window.height = self.window.height.max(200.0);
         self.terminal.scroll_multiplier = self.terminal.scroll_multiplier.clamp(0.1, 20.0);
+        self.agents.sidebar_width = self.agents.sidebar_width.clamp(160.0, 600.0);
     }
 }
 
