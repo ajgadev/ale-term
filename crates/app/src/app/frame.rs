@@ -145,6 +145,7 @@ impl App {
             })
             .collect();
         let sidebar = self.sidebar_rect().map(|rect| (rect, self.sidebar_model(), self.sidebar.scroll));
+        let dock = self.dock_rect().map(|rect| (rect, self.dock_model(), self.dock_lights()));
         let board = matches!(self.overlay, Overlay::Board { .. }).then(|| (self.content_rect(), self.board_model()));
         let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
         let workspace_name = self.workspace_name().to_owned();
@@ -237,6 +238,7 @@ impl App {
             titles: &titles,
             active: active_position,
             hovered: self.mouse.hover_tab,
+            layout: self.config.agents.layout,
         };
         tab_bar.draw(renderer, &view, scale, palette);
         if let Some((rect, model)) = &graph {
@@ -244,6 +246,9 @@ impl App {
         }
         if let Some((rect, model, scroll)) = &sidebar {
             crate::sidebar::draw(renderer, model, *rect, scale, *scroll, palette);
+        }
+        if let Some((rect, model, lights)) = &dock {
+            crate::dock::draw(renderer, model, *rect, scale, *lights, palette);
         }
 
         match &self.overlay {

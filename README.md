@@ -29,7 +29,8 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Keys | Action |
 |---|---|
 | Shift+Cmd+P | Command palette |
-| Cmd+B | Show or hide the sidebar |
+| Cmd+B | Show or hide the sidebar (or, in the board layout, the docked board) |
+| Option+Cmd+B | Switch between the sidebar and board layouts |
 | Shift+Cmd+B | Show or hide the agent board |
 | Option+Cmd+G | Show or hide the agent graph beside the focused agent |
 | Shift+Cmd+T | New session: a page to give an agent a task, or open a plain terminal |
@@ -112,6 +113,17 @@ Status travels over a Unix socket on this Mac; nothing uses the network.
 **Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
 Working, Done and Idle. Click a card, or move with the arrow keys and press
 Enter, to jump to that agent.
+
+**Board layout**: instead of the sidebar, the agents can sit on a board
+docked across the top of the window, with the tabs and panes below it.
+Switch with the two small buttons at the right end of the tab bar (sidebar
+or board), with Option+Cmd+B, or with "Layout" in the settings; the choice
+is saved in the settings file. The board shows each column's cards in a set
+number of rows (the − and + in its header, or "Board rows" in the
+settings); scroll over a column to see the rest of its cards. Its height
+stays the same as agents come and go, so the terminals below are not
+resized. The agent in the focused pane is outlined; click a card to go to
+it.
 
 **Graph** (Option+Cmd+G, or click an agent in the sidebar that has
 subagents): a panel beside the agent's terminal showing the agent, the

@@ -39,6 +39,8 @@ pub struct Card {
     /// What it is doing or waiting for.
     pub status: String,
     pub elapsed: String,
+    /// Image key of the agent's icon (see `icons`).
+    pub icon: u64,
 }
 
 #[derive(Default)]
@@ -213,6 +215,7 @@ mod tests {
             project: "shop".into(),
             status: "Editing".into(),
             elapsed: "3m".into(),
+            icon: 0,
         }
     }
 

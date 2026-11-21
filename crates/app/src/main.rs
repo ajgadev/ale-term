@@ -12,6 +12,7 @@ mod app;
 mod board;
 mod boxdraw;
 mod chrome;
+mod dock;
 mod draw;
 mod graph;
 mod icons;

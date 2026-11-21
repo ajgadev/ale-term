@@ -7,6 +7,7 @@
 //! of those events asks for it, so an idle window uses no CPU.
 
 mod agents;
+mod dock_panel;
 mod frame;
 mod graph_panel;
 mod menus;
@@ -172,6 +173,7 @@ pub struct App {
     archive: ale_agents::Archive,
     sidebar: agents::SidebarState,
     graph: graph_panel::GraphState,
+    dock: dock_panel::DockState,
     /// Claude Code's settings already contain our status hooks.
     claude_hooks: bool,
     /// The user said no to installing them.
@@ -234,6 +236,7 @@ impl App {
             archive,
             sidebar: agents::SidebarState { visible: sidebar_visible, ..Default::default() },
             graph: graph_panel::GraphState::default(),
+            dock: dock_panel::DockState::default(),
             claude_hooks: false,
             hooks_declined: false,
             last_sound: Instant::now(),
@@ -293,16 +296,18 @@ impl App {
         let fullscreen = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
         let label = TabBar::workspace_label(self.workspace_name());
         let label_width = self.renderer.as_ref().map_or(0.0, |r| r.text_width(&label));
-        // With the sidebar open the window buttons sit over it, not the bar.
-        let lights = !fullscreen && !self.sidebar.visible;
+        // With the sidebar open the window buttons sit over it, not the
+        // bar; with the board docked above, on the board's header.
+        let top = self.dock_height();
+        let lights = !fullscreen && self.sidebar_width() == 0.0 && top == 0.0;
         let (count, width) = (self.visible_tabs().len(), self.window_size().0);
-        TabBar::layout(count, width, self.scale(), self.sidebar_width(), lights, label_width)
+        TabBar::layout(count, width, self.scale(), (self.sidebar_width(), top), lights, label_width)
     }
 
     /// The area below the tab bar, where panes go.
     fn content_rect(&self) -> Rect {
         let (width, height) = self.window_size();
-        let bar = TabBar::height(self.scale());
+        let bar = self.dock_height() + TabBar::height(self.scale());
         let left = self.sidebar_width();
         let right = self.graph_width();
         Rect::new(left, bar, (width - left - right).max(0.0), (height - bar).max(0.0))
@@ -662,6 +667,7 @@ impl App {
                 self.sidebar.searching = false;
                 self.relayout();
             }
+            Action::SwitchLayout => self.toggle_layout(),
             Action::ToggleBoard => {
                 self.overlay = match self.overlay {
                     Overlay::Board { .. } => Overlay::None,
@@ -1091,6 +1097,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.start_launch(false);
                 } else if step == "start:agents" {
                     self.open_agent_menu();
+                } else if step == "demo:agents" {
+                    self.demo_agents();
                 } else if step == "sidebar:new" {
                     self.open_new_session_menu();
                 } else if step == "down" {

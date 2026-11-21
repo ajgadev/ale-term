@@ -63,7 +63,7 @@ impl App {
             return None;
         }
         let (window_width, window_height) = self.window_size();
-        let top = crate::chrome::TabBar::height(self.scale());
+        let top = self.content_rect().y;
         Some(Rect::new(window_width - width, top, width, (window_height - top).max(0.0)))
     }
 

@@ -195,6 +195,22 @@ pub struct AgentsConfig {
     pub notifications: bool,
     /// The command the "New session" button runs in a new tab.
     pub new_session_command: String,
+    /// Where agents are shown: a sidebar, or a board across the top.
+    pub layout: AgentLayout,
+    /// Rows of cards the board layout shows before a column scrolls.
+    pub board_rows: u32,
+}
+
+/// How the window shows the agents beside the terminals.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLayout {
+    /// A list down the left side, grouped by project or status.
+    #[default]
+    Sidebar,
+    /// Cards in columns by state (Needs you, Working, Done, Idle) above
+    /// the tabs.
+    Board,
 }
 
 impl Default for AgentsConfig {
@@ -205,6 +221,8 @@ impl Default for AgentsConfig {
             sound: true,
             notifications: true,
             new_session_command: "claude".into(),
+            layout: AgentLayout::Sidebar,
+            board_rows: 2,
         }
     }
 }

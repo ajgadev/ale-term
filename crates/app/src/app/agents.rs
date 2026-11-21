@@ -233,24 +233,7 @@ impl App {
     // ---- Board --------------------------------------------------------------
 
     pub(super) fn board_model(&self) -> board::Model {
-        let now = Instant::now();
-        let mut model = board::Model::default();
-        for tab in &self.tabs {
-            let project = self.workspace(tab.workspace).map_or("", |w| w.name.as_str());
-            for pane_id in tab.root.panes() {
-                let Some(pane) = self.panes.get(&pane_id) else { continue };
-                let Some(session) = &pane.agent else { continue };
-                model.columns[board::column_of(session.state)].push(board::Card {
-                    target: Target { tab: tab.id, pane: pane_id },
-                    state: session.state,
-                    agent: session.kind.name().to_owned(),
-                    title: self.agent_title(pane, session),
-                    project: project.to_owned(),
-                    status: Self::agent_status(session),
-                    elapsed: sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
-                });
-            }
-        }
+        let mut model = board::Model { columns: self.board_cards(), ..Default::default() };
         if let Overlay::Board { selected } = self.overlay {
             model.selected = selected;
         }
@@ -426,7 +409,8 @@ impl App {
     // ---- Sidebar ------------------------------------------------------------
 
     pub(super) fn sidebar_width(&self) -> f32 {
-        if !self.sidebar.visible {
+        // In the board layout the agents are on the board instead.
+        if !self.sidebar.visible || self.board_layout() {
             return 0.0;
         }
         let width = (self.config.agents.sidebar_width * self.scale()).round();
@@ -435,7 +419,8 @@ impl App {
     }
 
     pub(super) fn sidebar_rect(&self) -> Option<Rect> {
-        self.sidebar.visible.then(|| Rect::new(0.0, 0.0, self.sidebar_width(), self.window_size().1))
+        let width = self.sidebar_width();
+        (width > 0.0).then(|| Rect::new(0.0, 0.0, width, self.window_size().1))
     }
 
     /// A short label for a pane that is not an agent: its running command,

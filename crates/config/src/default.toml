@@ -33,9 +33,15 @@ shell_integration = true
 image_memory_mb = 128
 
 [agents]
-# Show the sidebar listing agents and shells at launch (toggle: Cmd+B).
+# Where agents are shown: "sidebar" lists them down the left side; "board"
+# puts them as cards in columns (Needs you, Working, Done, Idle) above the
+# tabs. The button at the right end of the tab bar switches between them.
+layout = "sidebar"
+# Show the sidebar (or the board) at launch (toggle: Cmd+B).
 sidebar = true
 sidebar_width = 260.0
+# Rows of cards the board shows before a column scrolls.
+board_rows = 2
 # Play a sound when an agent is stuck waiting for you (a permission prompt, a
 # question, an error). A finished turn never makes a sound.
 sound = true

@@ -6,7 +6,7 @@
 //! `ale_config::set_value`); everything else in the file is kept, and the
 //! file remains the place for the rest (colors, workspace templates).
 
-use ale_config::{Config, Palette, RendererChoice, SettingValue, ThemeMode};
+use ale_config::{AgentLayout, Config, Palette, RendererChoice, SettingValue, ThemeMode};
 use ale_render::Renderer;
 
 use crate::draw::color;
@@ -52,7 +52,9 @@ pub const SETTINGS: &[Setting] = &[
     Setting { section: "terminal", key: "option_as_meta", group: "Terminal", label: "Option as Meta", kind: Kind::Toggle, help: "Send ESC + key instead of composing characters with Option." },
     Setting { section: "terminal", key: "shell_integration", group: "Terminal", label: "Shell integration", kind: Kind::Toggle, help: "Let zsh report its folder, prompts and commands. Applies to new panes." },
     Setting { section: "terminal", key: "image_memory_mb", group: "Terminal", label: "Image memory (MB)", kind: whole(32.0, 0.0, 4096.0), help: "Budget for inline images; the oldest are dropped beyond it." },
-    Setting { section: "agents", key: "sidebar", group: "Agents", label: "Sidebar at launch", kind: Kind::Toggle, help: "Show the sidebar when the app starts. Cmd+B toggles it any time." },
+    Setting { section: "agents", key: "layout", group: "Agents", label: "Layout", kind: Kind::Choice(&["sidebar", "board"]), help: "Agents in a sidebar, or as cards on a board above the tabs. Also: ⌥⌘B." },
+    Setting { section: "agents", key: "board_rows", group: "Agents", label: "Board rows", kind: whole(1.0, 1.0, 6.0), help: "Rows of cards the board layout shows before a column scrolls." },
+    Setting { section: "agents", key: "sidebar", group: "Agents", label: "Show at launch", kind: Kind::Toggle, help: "Show the sidebar or board when the app starts. Cmd+B toggles it any time." },
     Setting { section: "agents", key: "sidebar_width", group: "Agents", label: "Sidebar width", kind: number(10.0, 160.0, 600.0), help: "In points." },
     Setting { section: "agents", key: "sound", group: "Agents", label: "Sound", kind: Kind::Toggle, help: "Play a sound when an agent is stuck waiting for you." },
     Setting { section: "agents", key: "notifications", group: "Agents", label: "Notifications", kind: Kind::Toggle, help: "Notify when that happens and the window is not in front." },
@@ -95,6 +97,14 @@ pub fn current(config: &Config, setting: &Setting) -> SettingValue {
         ("terminal", "option_as_meta") => Bool(config.terminal.option_as_meta),
         ("terminal", "shell_integration") => Bool(config.terminal.shell_integration),
         ("terminal", "image_memory_mb") => Integer(config.terminal.image_memory_mb as i64),
+        ("agents", "layout") => Text(
+            match config.agents.layout {
+                AgentLayout::Sidebar => "sidebar",
+                AgentLayout::Board => "board",
+            }
+            .into(),
+        ),
+        ("agents", "board_rows") => Integer(config.agents.board_rows as i64),
         ("agents", "sidebar") => Bool(config.agents.sidebar),
         ("agents", "sidebar_width") => Float(config.agents.sidebar_width as f64),
         ("agents", "sound") => Bool(config.agents.sound),

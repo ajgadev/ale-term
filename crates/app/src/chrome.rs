@@ -3,7 +3,7 @@
 //! Layout (where each tab is) is computed by one function that both drawing
 //! and mouse hit-testing use, so the two can never disagree.
 
-use ale_config::Palette;
+use ale_config::{AgentLayout, Palette};
 use ale_render::Renderer;
 
 use crate::draw::color;
@@ -17,6 +17,8 @@ const TAB_MAX_WIDTH: f32 = 240.0;
 const TAB_PADDING: f32 = 14.0;
 const WORKSPACE_MAX_WIDTH: f32 = 220.0;
 const CLOSE_SIZE: f32 = 20.0;
+/// Width of each half of the layout switch.
+const SWITCH_SEGMENT: f32 = 30.0;
 
 pub struct TabBar {
     pub bar: Rect,
@@ -28,7 +30,13 @@ pub struct TabBar {
     pub close: Vec<Rect>,
     /// The "+" button.
     pub new_tab: Rect,
+    /// The switch between the sidebar and board layouts, at the right end:
+    /// one half for each.
+    pub switch: [Rect; 2],
 }
+
+/// The layout each half of the switch stands for.
+const SWITCH_LAYOUTS: [AgentLayout; 2] = [AgentLayout::Sidebar, AgentLayout::Board];
 
 /// What the tab bar shows at the moment.
 pub struct TabBarView<'a> {
@@ -39,6 +47,8 @@ pub struct TabBarView<'a> {
     pub active: usize,
     /// What the pointer is over, for showing a tab's close button.
     pub hovered: Option<TabBarHit>,
+    /// The layout in use, shown selected in the switch.
+    pub layout: AgentLayout,
 }
 
 /// What a tab shows.
@@ -59,6 +69,8 @@ pub enum TabBarHit {
     Close(usize),
     NewTab,
     Workspace,
+    /// One half of the layout switch.
+    Layout(AgentLayout),
     /// Empty space, used for dragging the window.
     Empty,
 }
@@ -67,14 +79,15 @@ impl TabBar {
     /// Computes where everything in the tab bar goes.
     ///
     /// The bar spans from `bar_x` (the sidebar's right edge, or 0) to the
-    /// window's right edge. `traffic_lights` says whether the macOS window
+    /// window's right edge, starting `top` pixels down (below the board, in
+    /// the board layout). `traffic_lights` says whether the macOS window
     /// buttons sit at the bar's left end and need room. `workspace_width`
     /// is the width of the workspace label's text.
     pub fn layout(
         tab_count: usize,
         window_width: f32,
         scale: f32,
-        bar_x: f32,
+        (bar_x, top): (f32, f32),
         traffic_lights: bool,
         workspace_width: f32,
     ) -> TabBar {
@@ -83,14 +96,19 @@ impl TabBar {
         let padding = (TAB_PADDING * scale).round();
         let bar_width = (window_width - bar_x).max(0.0);
         let label = (workspace_width + padding * 2.0).min(WORKSPACE_MAX_WIDTH * scale).min(bar_width * 0.3);
-        let workspace = Rect::new(lights, 0.0, label.round(), height);
+        let workspace = Rect::new(lights, top, label.round(), height);
         let left = lights + workspace.w;
         let button = height;
-        let available = (window_width - left - button).max(0.0);
+        // The layout switch, inset from the bar's edges.
+        let inset = (7.0 * scale).round();
+        let segment = (SWITCH_SEGMENT * scale).round();
+        let switch_x = window_width - inset - segment * 2.0;
+        let switch = [0.0, 1.0].map(|i| Rect::new(switch_x + i * segment, top + inset, segment, height - inset * 2.0));
+        let available = (switch_x - inset - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
 
         let tabs: Vec<Rect> = (0..tab_count)
-            .map(|i| Rect::new(left + i as f32 * width, 0.0, width, height))
+            .map(|i| Rect::new(left + i as f32 * width, top, width, height))
             .collect();
         // A square at the right end of each tab, unless tabs are too
         // narrow to spare the room.
@@ -102,15 +120,16 @@ impl TabBar {
                     return Rect::default();
                 }
                 let x = tab.x + tab.w - close_size - (6.0 * scale).round();
-                Rect::new(x, ((height - close_size) / 2.0).round(), close_size, close_size)
+                Rect::new(x, top + ((height - close_size) / 2.0).round(), close_size, close_size)
             })
             .collect();
         TabBar {
-            bar: Rect::new(bar_x, 0.0, bar_width, height),
+            bar: Rect::new(bar_x, top, bar_width, height),
             workspace,
             tabs,
             close,
-            new_tab: Rect::new(left + tab_count as f32 * width, 0.0, button, height),
+            new_tab: Rect::new(left + tab_count as f32 * width, top, button, height),
+            switch,
         }
     }
 
@@ -121,6 +140,9 @@ impl TabBar {
     pub fn hit(&self, x: f32, y: f32) -> Option<TabBarHit> {
         if !self.bar.contains(x, y) {
             return None;
+        }
+        if let Some(index) = self.switch.iter().position(|half| half.contains(x, y)) {
+            return Some(TabBarHit::Layout(SWITCH_LAYOUTS[index]));
         }
         if let Some(index) = self.close.iter().position(|close| close.contains(x, y)) {
             return Some(TabBarHit::Close(index));
@@ -143,15 +165,15 @@ impl TabBar {
     }
 
     pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) {
-        let TabBarView { workspace, titles, active, hovered } = *view;
+        let TabBarView { workspace, titles, active, hovered, layout } = *view;
         let metrics = r.metrics();
         let line = scale.round().max(1.0);
         let bar = self.bar;
-        let text_y = ((bar.h - metrics.height) / 2.0).round();
+        let text_y = bar.y + ((bar.h - metrics.height) / 2.0).round();
         let padding = (TAB_PADDING * scale).round();
 
         r.rect(bar.x, bar.y, bar.w, bar.h, color(palette.chrome));
-        r.rect(bar.x, bar.h - line, bar.w, line, color(palette.border));
+        r.rect(bar.x, bar.y + bar.h - line, bar.w, line, color(palette.border));
 
         // Workspace label.
         let label = fit(&Self::workspace_label(workspace), self.workspace.w - padding * 2.0, metrics.width);
@@ -186,7 +208,7 @@ impl TabBar {
                     let size = metrics.height.round();
                     // The icon plus a little air before the title.
                     let slot = size + (metrics.width * 0.75).round();
-                    let icon_y = ((bar.h - size) / 2.0).round();
+                    let icon_y = bar.y + ((bar.h - size) / 2.0).round();
                     r.image(icon, x, icon_y, size, size, [0.0, 0.0, 1.0, 1.0]);
                     if let Some(dot) = dot {
                         let radius = (3.0 * scale).round();
@@ -235,7 +257,56 @@ impl TabBar {
 
         let plus_x = self.new_tab.x + ((self.new_tab.w - metrics.width) / 2.0).round();
         r.text("+", false, plus_x, text_y, self.new_tab.w, color(palette.chrome_text_dim));
+
+        self.draw_switch(r, layout, hovered, scale, palette);
     }
+
+    /// The layout switch: a small picture of each layout, the one in use
+    /// raised and in the accent color.
+    fn draw_switch(&self, r: &mut Renderer, layout: AgentLayout, hovered: Option<TabBarHit>, scale: f32, palette: &Palette) {
+        let line = scale.round().max(1.0);
+        let [first, second] = self.switch;
+        let whole = Rect::new(first.x, first.y, second.x + second.w - first.x, first.h);
+        outline(r, whole, line, color(palette.border));
+        for (half, choice) in self.switch.iter().zip(SWITCH_LAYOUTS) {
+            let chosen = choice == layout;
+            if chosen {
+                r.rect(half.x + line, half.y + line, half.w - line * 2.0, half.h - line * 2.0, color(palette.chrome_active));
+            } else if hovered == Some(TabBarHit::Layout(choice)) {
+                r.rect(half.x + line, half.y + line, half.w - line * 2.0, half.h - line * 2.0, color(palette.border));
+            }
+            let ink = color(if chosen { palette.accent } else { palette.chrome_text_dim });
+            // A window outline with the agents' part filled in: a strip
+            // down the left, or a band of three cards across the top.
+            let (w, h) = ((14.0 * scale).round(), (11.0 * scale).round());
+            let icon = Rect::new(half.x + ((half.w - w) / 2.0).round(), half.y + ((half.h - h) / 2.0).round(), w, h);
+            outline(r, icon, line, ink);
+            match choice {
+                AgentLayout::Sidebar => {
+                    r.rect(icon.x, icon.y, (w * 0.38).round(), h, ink);
+                }
+                AgentLayout::Board => {
+                    let band = (h * 0.45).round();
+                    let gap = line;
+                    let card = ((w - line * 2.0 - gap * 4.0) / 3.0).floor();
+                    for i in 0..3 {
+                        let x = icon.x + line + gap + i as f32 * (card + gap);
+                        r.rect(x, icon.y + line + gap, card, band - line - gap, ink);
+                    }
+                    r.rect(icon.x, icon.y + band, w, line, ink);
+                }
+            }
+        }
+        r.rect(second.x, second.y, line, second.h, color(palette.border));
+    }
+}
+
+/// A one-line frame just inside `rect`.
+fn outline(r: &mut Renderer, rect: Rect, line: f32, ink: ale_render::Color) {
+    r.rect(rect.x, rect.y, rect.w, line, ink);
+    r.rect(rect.x, rect.y + rect.h - line, rect.w, line, ink);
+    r.rect(rect.x, rect.y, line, rect.h, ink);
+    r.rect(rect.x + rect.w - line, rect.y, line, rect.h, ink);
 }
 
 /// Shortens `text` with an ellipsis so it fits in `max_width` pixels.
@@ -260,19 +331,19 @@ mod tests {
     #[test]
     fn tabs_share_the_width_up_to_a_maximum() {
         // An 72px label plus 14px padding each side: tabs start at 78+100.
-        let bar = TabBar::layout(2, 1000.0, 1.0, 0.0, true, 72.0);
+        let bar = TabBar::layout(2, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         assert_eq!(bar.workspace, Rect::new(78.0, 0.0, 100.0, 38.0));
         assert_eq!(bar.tabs[0], Rect::new(178.0, 0.0, 240.0, 38.0));
         assert_eq!(bar.tabs[1].x, 418.0);
         assert_eq!(bar.new_tab.x, 658.0);
 
         // Many tabs shrink to fit and never run past the window.
-        let bar = TabBar::layout(20, 1000.0, 1.0, 0.0, true, 72.0);
+        let bar = TabBar::layout(20, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         assert!(bar.new_tab.x + bar.new_tab.w <= 1000.0);
 
         // Beside a 260px sidebar the bar starts at its edge, with no room
         // reserved for the window buttons (they sit over the sidebar).
-        let bar = TabBar::layout(1, 1000.0, 1.0, 260.0, false, 72.0);
+        let bar = TabBar::layout(1, 1000.0, 1.0, (260.0, 0.0), false, 72.0);
         assert_eq!(bar.bar, Rect::new(260.0, 0.0, 740.0, 38.0));
         assert_eq!(bar.workspace.x, 260.0);
         assert_eq!(bar.hit(100.0, 10.0), None);
@@ -281,7 +352,7 @@ mod tests {
 
     #[test]
     fn hit_testing_matches_layout() {
-        let bar = TabBar::layout(2, 1000.0, 1.0, 0.0, true, 72.0);
+        let bar = TabBar::layout(2, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         assert_eq!(bar.hit(100.0, 10.0), Some(TabBarHit::Workspace));
         assert_eq!(bar.hit(200.0, 10.0), Some(TabBarHit::Tab(0)));
         // Each tab has a close button at its right end.
@@ -289,7 +360,7 @@ mod tests {
         assert!(close.x > bar.tabs[0].x + 150.0 && close.x + close.w <= bar.tabs[0].x + bar.tabs[0].w);
         assert_eq!(bar.hit(close.x + 2.0, close.y + 2.0), Some(TabBarHit::Close(0)));
         // Very narrow tabs have none, and the whole tab selects.
-        let crowded = TabBar::layout(40, 1000.0, 1.0, 0.0, true, 72.0);
+        let crowded = TabBar::layout(40, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         assert_eq!(crowded.close[0].w, 0.0);
         let first = crowded.tabs[0];
         assert_eq!(crowded.hit(first.x + first.w - 2.0, 10.0), Some(TabBarHit::Tab(0)));
@@ -298,6 +369,33 @@ mod tests {
         assert_eq!(bar.hit(900.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(20.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(100.0, 60.0), None);
+    }
+
+    #[test]
+    fn the_layout_switch_sits_at_the_right_end() {
+        let bar = TabBar::layout(3, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
+        let [sidebar, board] = bar.switch;
+        assert!(board.x + board.w <= 1000.0 && sidebar.x + sidebar.w <= board.x + 0.5);
+        assert!(bar.new_tab.x + bar.new_tab.w <= sidebar.x);
+        assert_eq!(bar.hit(sidebar.x + 3.0, 19.0), Some(TabBarHit::Layout(AgentLayout::Sidebar)));
+        assert_eq!(bar.hit(board.x + 3.0, 19.0), Some(TabBarHit::Layout(AgentLayout::Board)));
+        // Many tabs never run into it.
+        let crowded = TabBar::layout(40, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
+        let last = crowded.tabs[39];
+        assert!(crowded.new_tab.x + crowded.new_tab.w <= crowded.switch[0].x);
+        assert!(last.x + last.w <= crowded.switch[0].x);
+    }
+
+    #[test]
+    fn the_bar_can_sit_below_the_board() {
+        let bar = TabBar::layout(2, 1000.0, 1.0, (0.0, 200.0), false, 72.0);
+        assert_eq!(bar.bar, Rect::new(0.0, 200.0, 1000.0, 38.0));
+        assert!(bar.tabs.iter().chain(&bar.switch).chain([&bar.new_tab, &bar.workspace]).all(|r| r.y >= 200.0));
+        assert_eq!(bar.hit(200.0, 10.0), None);
+        assert_eq!(bar.hit(20.0, 210.0), Some(TabBarHit::Workspace));
+        assert_eq!(bar.hit(bar.tabs[1].x + 5.0, 210.0), Some(TabBarHit::Tab(1)));
+        let close = bar.close[0];
+        assert_eq!(bar.hit(close.x + 2.0, close.y + 2.0), Some(TabBarHit::Close(0)));
     }
 
     #[test]

@@ -408,11 +408,21 @@ impl App {
     /// Writes a setting to the file and applies it at once.
     fn settings_write(&mut self, index: usize, value: ale_config::SettingValue) {
         let setting = &crate::settings::SETTINGS[index];
-        match ale_config::set_value(setting.section, setting.key, &value) {
-            Ok(()) => self.reload_config(),
+        self.write_setting(setting.section, setting.key, value);
+    }
+
+    /// Writes `section.key` to the settings file and applies it at once.
+    /// On failure the reason is shown and false returned.
+    pub(super) fn write_setting(&mut self, section: &str, key: &str, value: ale_config::SettingValue) -> bool {
+        match ale_config::set_value(section, key, &value) {
+            Ok(()) => {
+                self.reload_config();
+                true
+            }
             Err(error) => {
                 let lines = error.lines().take(8).map(str::to_owned).collect();
                 self.show_message("The setting could not be saved", lines);
+                false
             }
         }
     }

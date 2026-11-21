@@ -148,6 +148,14 @@ impl App {
             return;
         }
 
+        // The docked board, in the board layout.
+        if let Some(hit) = self.dock_hit(x, y) {
+            if mouse_button == MouseButton::Left {
+                self.dock_click(hit);
+            }
+            return;
+        }
+
         // Sidebar.
         if let Some(hit) = self.sidebar_hit(x, y) {
             if mouse_button == MouseButton::Left {
@@ -177,6 +185,7 @@ impl App {
                 }
                 (TabBarHit::Workspace, MouseButton::Left) => self.open_list(ListKind::Workspaces),
                 (TabBarHit::NewTab, MouseButton::Left) => self.new_tab(None),
+                (TabBarHit::Layout(layout), MouseButton::Left) => self.set_layout(layout),
                 (TabBarHit::Empty, MouseButton::Left) => {
                     let clicks = self.register_click();
                     if let Some(window) = &self.window {
@@ -317,10 +326,17 @@ impl App {
         let hover_tab = if self.overlay.is_modal() {
             None
         } else {
-            self.tab_bar().hit(x, y).filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_)))
+            self.tab_bar()
+                .hit(x, y)
+                .filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_)))
         };
         if hover_tab != self.mouse.hover_tab {
             self.mouse.hover_tab = hover_tab;
+            self.redraw();
+        }
+        let hover_dock = if self.overlay.is_modal() { None } else { self.dock_hit(x, y) };
+        if hover_dock != self.dock.hovered {
+            self.dock.hovered = hover_dock;
             self.redraw();
         }
         let hover_sidebar = if self.overlay.is_modal() { None } else { self.sidebar_hit(x, y) };
@@ -384,6 +400,10 @@ impl App {
             Overlay::Search { .. } | Overlay::None => {}
         }
 
+        if let Some(hit) = self.dock_hit(x, y) {
+            use crate::dock::Hit;
+            return hand(matches!(hit, Hit::Card(_) | Hit::FewerRows | Hit::MoreRows));
+        }
         if let Some(hit) = self.sidebar_hit(x, y) {
             use crate::sidebar::Hit;
             return match hit {
@@ -560,6 +580,23 @@ impl App {
                 MouseScrollDelta::PixelDelta(position) => position.y as f32,
             };
             return self.sidebar_scroll(pixels);
+        }
+        if let Some(hit) = self.dock_hit(x, y) {
+            let column = match hit {
+                crate::dock::Hit::Column(column) => Some(column),
+                crate::dock::Hit::Card(target) => {
+                    self.board_cards().iter().position(|cards| cards.iter().any(|card| card.target == target))
+                }
+                _ => None,
+            };
+            if let Some(column) = column {
+                let pixels = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => lines * cell_height * 3.0,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32,
+                };
+                self.dock_scroll(column, pixels);
+            }
+            return;
         }
         let layout = self.active_layout();
         let Some(id) = layout.pane_at(x, y) else { return };

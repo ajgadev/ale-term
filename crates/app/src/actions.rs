@@ -22,6 +22,8 @@ pub enum Action {
     SetUpWorkspace,
     ToggleSidebar,
     ToggleBoard,
+    /// Between the sidebar and board layouts.
+    SwitchLayout,
     ToggleGraph,
     NewAgentSession,
     ShowArchive,
@@ -73,7 +75,8 @@ pub const COMMANDS: &[(Action, &str, &str)] = &[
     (Action::RenameWorkspace, "Rename Workspace", ""),
     (Action::MoveTab, "Move Tab to Workspace", ""),
     (Action::SetUpWorkspace, "Set Up Workspace Tabs from Template", ""),
-    (Action::ToggleSidebar, "Toggle Sidebar", "⌘B"),
+    (Action::ToggleSidebar, "Toggle Sidebar or Docked Board", "⌘B"),
+    (Action::SwitchLayout, "Switch Layout: Sidebar / Board", "⌥⌘B"),
     (Action::ToggleBoard, "Toggle Agent Board", "⇧⌘B"),
     (Action::ToggleGraph, "Toggle Agent Graph", "⌥⌘G"),
     (Action::NewAgentSession, "New Agent Session", "⇧⌘T"),
@@ -159,6 +162,7 @@ pub fn from_key(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Optio
     Some(match text.as_str() {
         "t" if shift => Action::NewAgentSession,
         "t" => Action::NewTab,
+        "b" if alt => Action::SwitchLayout,
         "b" if shift => Action::ToggleBoard,
         "b" => Action::ToggleSidebar,
         "a" if shift => Action::NextAttention,
