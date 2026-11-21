@@ -148,6 +148,14 @@ impl App {
         let dock = self.dock_rect().map(|rect| (rect, self.dock_model(), self.dock_lights()));
         let board = matches!(self.overlay, Overlay::Board { .. }).then(|| (self.content_rect(), self.board_model()));
         let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
+        // A tab being dragged is drawn where the pointer holds it.
+        let dragged_tab = match self.mouse.drag {
+            Drag::Tab { id, grab, moved: true, .. } => visible
+                .iter()
+                .position(|i| self.tabs[*i].id == id)
+                .map(|position| (position, self.mouse.x - grab)),
+            _ => None,
+        };
         let workspace_name = self.workspace_name().to_owned();
         // Rows of an open list overlay, computed before the renderer is
         // borrowed.
@@ -240,6 +248,7 @@ impl App {
             titles: &titles,
             active: active_position,
             hovered: self.mouse.hover_tab,
+            dragged: dragged_tab,
             layout: self.config.agents.layout,
             hover_seconds: self.mouse.hover_tab_since.elapsed().as_secs_f32(),
         };

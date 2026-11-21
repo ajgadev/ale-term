@@ -26,8 +26,8 @@ pub struct SidebarState {
     pub scroll: f32,
     /// What the pointer is over, for hover highlights.
     pub hovered: Option<Hit>,
-    /// The workspace a dragged row is over.
-    pub drop: Option<crate::workspace::WorkspaceId>,
+    /// Where a dragged row would land.
+    pub drop: Option<sidebar::DropSpot>,
 }
 
 /// Order of the groups when the sidebar is grouped by status: what needs
@@ -572,7 +572,12 @@ impl App {
             notice: self.hooks_notice(),
             archived: self.archive.len(),
             hovered: self.sidebar.hovered,
-            drop: self.sidebar.drop,
+            dragging: match self.mouse.drag {
+                Drag::Row { tab, moved: true, .. } => {
+                    Some(sidebar::Dragging { tab, pointer: (self.mouse.x, self.mouse.y), spot: self.sidebar.drop })
+                }
+                _ => None,
+            },
             menu_open: matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == crate::menu::MenuKind::NewSession),
         }
     }
@@ -588,10 +593,10 @@ impl App {
         sidebar::hit(&self.sidebar_model(), rect, cell, scale, self.sidebar.scroll, x, y)
     }
 
-    /// The workspace whose group in the sidebar is at a point.
-    pub(super) fn sidebar_group_at(&self, x: f32, y: f32) -> Option<crate::workspace::WorkspaceId> {
+    /// Where a dragged row of `tab` would land if dropped at a point.
+    pub(super) fn sidebar_drop_at(&self, x: f32, y: f32, tab: crate::workspace::TabId) -> Option<sidebar::DropSpot> {
         let (rect, cell, scale) = self.sidebar_geometry()?;
-        sidebar::group_at(&self.sidebar_model(), rect, cell, scale, self.sidebar.scroll, x, y)
+        sidebar::drop_at(&self.sidebar_model(), rect, cell, scale, self.sidebar.scroll, (x, y), tab)
     }
 
     pub(super) fn sidebar_scroll(&mut self, pixels: f32) {

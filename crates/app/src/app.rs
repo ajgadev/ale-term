@@ -106,9 +106,10 @@ enum Drag {
     /// The click went to a program that tracks the mouse itself.
     Reported(PaneId),
     /// Moving a tab along the tab bar. `moved` turns true once the pointer
-    /// has travelled far enough from `from` to count as a drag.
-    Tab { id: TabId, from: (f32, f32), moved: bool },
-    /// Carrying a sidebar row to another workspace's group.
+    /// has travelled far enough from `from` to count as a drag; `grab` is
+    /// how far into the tab the pointer took hold of it.
+    Tab { id: TabId, from: (f32, f32), grab: f32, moved: bool },
+    /// Carrying a sidebar row to another place in the list.
     Row { tab: TabId, from: (f32, f32), moved: bool },
 }
 
@@ -133,6 +134,9 @@ struct Mouse {
     hover_tab_since: Instant,
     /// The pointer shape last set, so it is only changed when needed.
     cursor: CursorIcon,
+    /// Whether the system may move the window when its title bar is
+    /// dragged; off while the pointer is on a tab.
+    window_movable: bool,
     /// A pane whose program was last sent a drag across cells: a program
     /// doing its own text selection (Claude Code's full-screen mode)
     /// probably has some selected.
@@ -293,6 +297,7 @@ impl App {
                 hover_tab: None,
                 hover_tab_since: Instant::now(),
                 cursor: CursorIcon::Default,
+                window_movable: true,
                 program_selection: None,
             },
             overlay: Overlay::None,
@@ -344,6 +349,37 @@ impl App {
         let lights = !fullscreen && self.sidebar_width() == 0.0 && top == 0.0;
         let (count, width) = (self.visible_tabs().len(), self.window_size().0);
         TabBar::layout(count, width, self.scale(), (self.sidebar_width(), top), lights, label_width)
+    }
+
+    /// Says whether the system may move the window when the title bar
+    /// area is dragged. Our own window dragging (empty parts of the tab
+    /// bar and sidebar) is only asked for where this is left on.
+    fn set_window_movable(&mut self, movable: bool) {
+        if movable == self.mouse.window_movable {
+            return;
+        }
+        self.mouse.window_movable = movable;
+        #[cfg(target_os = "macos")]
+        if let Some(window) = &self.window {
+            use objc2::msg_send;
+            use objc2::runtime::NSObject;
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+            {
+                // SAFETY: the handle guarantees a valid `NSView` pointer;
+                // `window` and `setMovable:` are plain AppKit methods with
+                // these signatures, and window events arrive on the main
+                // thread.
+                unsafe {
+                    let view: &NSObject = handle.ns_view.cast().as_ref();
+                    let ns_window: *mut NSObject = msg_send![view, window];
+                    if let Some(ns_window) = ns_window.as_ref() {
+                        let _: () = msg_send![ns_window, setMovable: movable];
+                    }
+                }
+            }
+        }
     }
 
     /// The area below the tab bar, where panes go.
@@ -1152,6 +1188,18 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         self.scripted_pointer = Some((x, y));
                     }
+                } else if let Some((kind, at)) = step.split_once(':').filter(|(kind, _)| matches!(*kind, "press" | "move"))
+                    && let Some((x, y)) = at.split_once(',')
+                    && let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.parse::<f64>())
+                {
+                    // "press:x,y" and "move:x,y" in window pixels, with
+                    // "release": the left button, for trying out drags.
+                    self.mouse_moved(PhysicalPosition::new(x, y));
+                    if kind == "press" {
+                        self.mouse_button(ElementState::Pressed, MouseButton::Left, event_loop);
+                    }
+                } else if step == "release" {
+                    self.mouse_button(ElementState::Released, MouseButton::Left, event_loop);
                 } else if step == "start:go" {
                     self.start_launch(true);
                 } else if step == "start:terminal" {

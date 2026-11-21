@@ -41,16 +41,12 @@ impl App {
     }
 
     /// Ends a tab or sidebar-row drag when the button comes up: a row
-    /// dropped on another workspace's group moves its tab there.
+    /// goes where the line in the sidebar showed it would.
     fn finish_tab_drag(&mut self) {
         if let Drag::Row { tab, moved: true, .. } = self.mouse.drag
-            && let Some(target) = self.sidebar.drop.take()
-            && let Some(index) = self.tabs.iter().position(|t| t.id == tab)
+            && let Some(spot) = self.sidebar.drop.take()
         {
-            // A deliberate move sticks: the tab no longer follows its
-            // folder.
-            self.tabs[index].pinned = true;
-            self.move_tab(index, target);
+            self.place_tab(tab, spot);
         }
         if matches!(self.mouse.drag, Drag::Tab { .. } | Drag::Row { .. }) {
             self.mouse.drag = Drag::None;
@@ -205,8 +201,9 @@ impl App {
                 (TabBarHit::Tab(index), MouseButton::Left) => {
                     self.select_tab(index);
                     // Holding the button and moving reorders the tab.
+                    let grab = self.tab_bar().tabs.get(index).map_or(0.0, |rect| x - rect.x);
                     if let Some(tab) = self.visible_tabs().get(index).and_then(|&i| self.tabs.get(i)) {
-                        self.mouse.drag = Drag::Tab { id: tab.id, from: (x, y), moved: false };
+                        self.mouse.drag = Drag::Tab { id: tab.id, from: (x, y), grab, moved: false };
                     }
                 }
                 (TabBarHit::Close(index), MouseButton::Left) | (TabBarHit::Tab(index), MouseButton::Middle) => {
@@ -335,28 +332,26 @@ impl App {
                     }
                 }
             }
-            Drag::Tab { id, from, moved } => {
+            Drag::Tab { id, from, grab, moved } => {
                 let far = (x - from.0).abs() > DRAG_THRESHOLD * self.scale();
                 if moved || far {
-                    self.mouse.drag = Drag::Tab { id, from, moved: true };
+                    self.mouse.drag = Drag::Tab { id, from, grab, moved: true };
                     // The tab takes the place of whichever tab the pointer
-                    // is over.
+                    // is over, and is drawn following the pointer.
                     let bar = self.tab_bar();
                     if let Some(position) = bar.tabs.iter().position(|tab| x >= tab.x && x < tab.x + tab.w) {
                         self.reorder_tab(id, position);
                     }
+                    self.redraw();
                 }
             }
             Drag::Row { tab, from, moved } => {
-                let far = (y - from.1).abs() > DRAG_THRESHOLD * self.scale();
+                let far = (x - from.0).abs().max((y - from.1).abs()) > DRAG_THRESHOLD * self.scale();
                 if moved || far {
                     self.mouse.drag = Drag::Row { tab, from, moved: true };
-                    let home = self.tabs.iter().find(|t| t.id == tab).map(|t| t.workspace);
-                    let over = self.sidebar_group_at(x, y).filter(|group| Some(*group) != home);
-                    if over != self.sidebar.drop {
-                        self.sidebar.drop = over;
-                        self.redraw();
-                    }
+                    self.sidebar.drop = self.sidebar_drop_at(x, y, tab);
+                    // The row's name follows the pointer.
+                    self.redraw();
                 }
             }
             Drag::None => {
@@ -416,6 +411,12 @@ impl App {
         if matches!(self.overlay, Overlay::Menu(_)) {
             self.menu_hover(x, y);
         }
+        // The tabs sit in the window's title bar, where the system would
+        // take a drag to move the window: over a tab, and while one is
+        // being dragged, the window stays put.
+        let over_tab = matches!(hover_tab, Some(TabBarHit::Tab(_) | TabBarHit::Close(_)));
+        let dragging = matches!(self.mouse.drag, Drag::Tab { .. } | Drag::Row { .. });
+        self.set_window_movable(!over_tab && !dragging);
         self.update_cursor();
     }
 

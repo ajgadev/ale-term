@@ -184,9 +184,11 @@ the view follows). Tabs outside any repository live in `general`.
 From the command palette you can also rename tabs and workspaces, move a tab
 to another workspace (it then stays there), and create a workspace by hand.
 
-With the mouse: drag a tab along the tab bar to reorder it, and drag a row
-in the sidebar onto another workspace's group to move its tab there (it
-then stays there). The group it would land in lights up while you drag.
+With the mouse: drag a tab along the tab bar to reorder it; it lifts out of
+the bar and follows the pointer. Drag a row in the sidebar up or down to
+reorder it within its workspace, or into another workspace's group to move
+its tab there (it then stays there). While you drag, the row's name follows
+the pointer and a line shows where it would land.
 
 **Templates** open a project's usual tabs in one go. Define them in the
 config file:

@@ -187,6 +187,34 @@ impl App {
         self.redraw();
     }
 
+    /// Puts the tab `id` where it was dropped in the sidebar: in the spot's
+    /// workspace, before the tab `before` or after the workspace's last tab.
+    pub(super) fn place_tab(&mut self, id: crate::workspace::TabId, spot: crate::sidebar::DropSpot) {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else { return };
+        let active = self.tabs.get(self.active).map(|tab| tab.id);
+        let mut tab = self.tabs.remove(from);
+        if tab.workspace != spot.workspace {
+            // A deliberate move sticks: the tab no longer follows its
+            // folder.
+            tab.pinned = true;
+            tab.workspace = spot.workspace;
+        }
+        let before = spot.before.and_then(|before| self.tabs.iter().position(|tab| tab.id == before));
+        let end = || self.tabs.iter().rposition(|tab| tab.workspace == spot.workspace).map(|last| last + 1);
+        let to = before.or_else(end).unwrap_or(self.tabs.len());
+        self.tabs.insert(to, tab);
+        if let Some(index) = self.tabs.iter().position(|tab| Some(tab.id) == active) {
+            self.active = index;
+            // The tab on screen may have changed workspace: follow it.
+            if active == Some(id) {
+                self.activate(index);
+            }
+        }
+        self.prune_workspaces();
+        self.mark_dirty();
+        self.redraw();
+    }
+
     pub(super) fn move_tab(&mut self, index: usize, target: WorkspaceId) {
         let Some(tab) = self.tabs.get_mut(index) else { return };
         if tab.workspace == target {

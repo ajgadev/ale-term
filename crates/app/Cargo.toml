@@ -18,3 +18,6 @@ pollster = "1.0.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 winit = "0.30"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

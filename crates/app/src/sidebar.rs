@@ -81,6 +81,39 @@ pub enum Row {
     Shell { target: Target, text: String, current: bool },
 }
 
+impl Row {
+    fn target(&self) -> Target {
+        match self {
+            Row::Agent { target, .. } | Row::Subagent { target, .. } | Row::Shell { target, .. } => *target,
+        }
+    }
+
+    /// What the row is called, for the label that follows a dragged row.
+    fn label(&self) -> &str {
+        match self {
+            Row::Agent { title, .. } => title,
+            Row::Subagent { text, .. } | Row::Shell { text, .. } => text,
+        }
+    }
+}
+
+/// Where a dragged row would land: in a workspace's group, above the rows
+/// of the tab `before`, or at the group's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DropSpot {
+    pub workspace: WorkspaceId,
+    pub before: Option<TabId>,
+}
+
+/// A row being carried by the pointer.
+pub struct Dragging {
+    /// The tab whose rows are being moved.
+    pub tab: TabId,
+    pub pointer: (f32, f32),
+    /// Where it would land if let go now; `None` when that changes nothing.
+    pub spot: Option<DropSpot>,
+}
+
 pub struct Group {
     pub title: String,
     /// The workspace this group lists, when grouped by project.
@@ -103,8 +136,8 @@ pub struct Model {
     pub archived: usize,
     /// What the pointer is over, drawn highlighted.
     pub hovered: Option<Hit>,
-    /// The workspace a dragged row would be dropped into.
-    pub drop: Option<WorkspaceId>,
+    /// A row being dragged, and where it would land.
+    pub dragging: Option<Dragging>,
     /// The "New session" menu is open.
     pub menu_open: bool,
 }
@@ -148,10 +181,20 @@ const TOP: f32 = 38.0;
 const PAD: f32 = 12.0;
 const LINE_GAP: f32 = 4.0;
 
-/// Places everything. `scroll` is how far the rows are scrolled, in pixels.
-/// Returns the placed items and the total height of the rows (for clamping
-/// the scroll).
-fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll: f32) -> (Vec<Placed<'a>>, f32) {
+/// How many items are fixed at the top: new session, search, toggle, three
+/// chips.
+const FIXED: usize = 6;
+
+/// Places the fixed controls and every row, scrolled by `scroll` pixels,
+/// including rows scrolled out of sight. Returns them with the total height
+/// of the rows and the band (top, bottom) in which rows are visible.
+fn place<'a>(
+    model: &'a Model,
+    area: Rect,
+    cell: (f32, f32),
+    scale: f32,
+    scroll: f32,
+) -> (Vec<Placed<'a>>, f32, (f32, f32)) {
     let pad = (PAD * scale).round();
     let gap = (LINE_GAP * scale).round();
     let line = cell.1;
@@ -210,17 +253,24 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
         row_y += gap * 2.0;
     }
     let content_height = row_y + scroll - rows_top;
+    (items, content_height, (rows_top, area.y + area.h - notice_height))
+}
 
+/// Places everything that shows. `scroll` is how far the rows are scrolled,
+/// in pixels. Returns the placed items and the total height of the rows
+/// (for clamping the scroll).
+fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll: f32) -> (Vec<Placed<'a>>, f32) {
+    let (mut items, content_height, band) = place(model, area, cell, scale, scroll);
     // Drop rows scrolled out of the visible band so they are neither drawn
     // nor clickable.
-    let band = (rows_top, area.y + area.h - notice_height);
-    let fixed = 6; // new session, search, toggle, three chips
     let mut index = 0;
     items.retain(|placed| {
         index += 1;
-        index <= fixed || (placed.rect.y >= band.0 - 1.0 && placed.rect.y + placed.rect.h <= band.1 + 1.0)
+        index <= FIXED || (placed.rect.y >= band.0 - 1.0 && placed.rect.y + placed.rect.h <= band.1 + 1.0)
     });
 
+    let gap = (LINE_GAP * scale).round();
+    let pinned_row = cell.1 + gap * 4.0;
     let bottom = area.y + area.h;
     items.push(Placed {
         rect: Rect::new(area.x, bottom - pinned_row, area.w, pinned_row),
@@ -273,30 +323,57 @@ pub fn hit(model: &Model, area: Rect, cell: (f32, f32), scale: f32, scroll: f32,
     Some(found.unwrap_or(Hit::Nothing))
 }
 
-/// The workspace whose group (heading or rows) is at a point, for
-/// dropping a dragged row. Below the last group counts as that group.
-pub fn group_at(
+/// Where a row of tab `dragged` would land if dropped at a point: in the
+/// group under the pointer, between the two tabs nearest to it. Below the
+/// last group counts as that group's end. `None` where there is no group,
+/// or where dropping would leave the tab where it is.
+pub fn drop_at(
     model: &Model,
     area: Rect,
     cell: (f32, f32),
     scale: f32,
     scroll: f32,
-    x: f32,
-    y: f32,
-) -> Option<WorkspaceId> {
+    (x, y): (f32, f32),
+    dragged: TabId,
+) -> Option<DropSpot> {
     if !area.contains(x, y) {
         return None;
     }
-    let (items, _) = layout(model, area, cell, scale, scroll);
-    let mut found = None;
+    let (items, _, band) = place(model, area, cell, scale, scroll);
+    if y < band.0 {
+        return None;
+    }
+    // The group under the pointer is the last heading above it; gather the
+    // span of each of its tabs (a tab with splits or subagents has several
+    // rows).
+    let mut workspace = None;
+    let mut tabs: Vec<(TabId, f32, f32)> = Vec::new();
     for placed in &items {
-        if let Item::Header(group) = &placed.item
-            && placed.rect.y <= y
-        {
-            found = group.workspace;
+        match &placed.item {
+            Item::Header(group) => {
+                if placed.rect.y > y {
+                    break;
+                }
+                workspace = group.workspace;
+                tabs.clear();
+            }
+            Item::Row(row) => {
+                let (tab, bottom) = (row.target().tab, placed.rect.y + placed.rect.h);
+                match tabs.last_mut() {
+                    Some(last) if last.0 == tab => last.2 = bottom,
+                    _ => tabs.push((tab, placed.rect.y, bottom)),
+                }
+            }
+            _ => {}
         }
     }
-    found
+    let workspace = workspace?;
+    let index = tabs.iter().position(|(_, top, bottom)| y < (top + bottom) / 2.0).unwrap_or(tabs.len());
+    let is_dragged = |at: Option<usize>| at.and_then(|at| tabs.get(at)).is_some_and(|tab| tab.0 == dragged);
+    if is_dragged(Some(index)) || is_dragged(index.checked_sub(1)) {
+        return None;
+    }
+    Some(DropSpot { workspace, before: tabs.get(index).map(|tab| tab.0) })
 }
 
 /// Shortens `text` to `width` pixels with an ellipsis.
@@ -326,7 +403,9 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
     r.rect(area.x + area.w - line, area.y, line, area.h, color(palette.border));
 
     let (items, _) = layout(model, area, cell, scale, scroll);
-    let hovered = |hit: Hit| model.hovered == Some(hit);
+    // Nothing lights up under the pointer while it carries a row.
+    let hovered = |hit: Hit| model.dragging.is_none() && model.hovered == Some(hit);
+    let spot = model.dragging.as_ref().and_then(|dragging| dragging.spot);
     // A faint wash behind a row under the pointer.
     let hover_wash = {
         let [red, green, blue, _] = color(palette.background);
@@ -384,7 +463,7 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
             }
             Item::Header(group) => {
                 // Lit while a dragged row is over this group.
-                let target = model.drop.is_some() && group.workspace == model.drop;
+                let target = spot.is_some_and(|spot| group.workspace == Some(spot.workspace));
                 let label = fit(&group.title, rect.w - pad * 2.0, cell.0);
                 let text_color = if target { color(palette.accent) } else { dim };
                 r.text(&label, target, rect.x + pad, rect.y + rect.h - metrics.height - gap, rect.w, text_color);
@@ -458,6 +537,73 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
             }
         }
     }
+    if let Some(dragging) = &model.dragging {
+        draw_drag(r, dragging, &items, area, scale, palette);
+    }
+}
+
+/// Shows a row being dragged: its rows fade where they still sit, a line
+/// marks where it would land, and its name follows the pointer.
+fn draw_drag(r: &mut Renderer, dragging: &Dragging, items: &[Placed], area: Rect, scale: f32, palette: &Palette) {
+    let metrics = r.metrics();
+    let pad = (PAD * scale).round();
+    let gap = (LINE_GAP * scale).round();
+    let line = scale.round().max(1.0);
+    let accent = color(palette.accent);
+
+    let mut label = None;
+    let [red, green, blue, _] = color(palette.chrome);
+    for placed in items {
+        if let Item::Row(row) = &placed.item
+            && row.target().tab == dragging.tab
+        {
+            let rect = placed.rect;
+            r.rect(rect.x, rect.y, rect.w - line, rect.h, [red, green, blue, 170]);
+            label = label.or(Some(row.label()));
+        }
+    }
+
+    // The line: above the rows of the tab it would go before, or under the
+    // last row of the group.
+    if let Some(spot) = dragging.spot {
+        let mut inside = false;
+        let mut at = None;
+        for placed in items {
+            match &placed.item {
+                Item::Header(group) => inside = group.workspace == Some(spot.workspace),
+                Item::Row(row) if inside => {
+                    if Some(row.target().tab) == spot.before {
+                        at = Some(placed.rect.y);
+                        break;
+                    }
+                    if spot.before.is_none() {
+                        at = Some(placed.rect.y + placed.rect.h);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(y) = at {
+            let thick = line * 2.0;
+            let radius = (3.0 * scale).round();
+            let y = (y - thick / 2.0).round();
+            r.rect(area.x + pad, y, area.w - pad * 2.0, thick, accent);
+            crate::draw::dot(r, area.x + pad, y + thick / 2.0, radius, accent);
+        }
+    }
+
+    // The row's name on a small card beside the pointer.
+    if let Some(label) = label {
+        let label = fit(label, 28.0 * metrics.width, metrics.width);
+        let width = r.text_width(&label) + pad * 2.0;
+        let height = metrics.height + gap * 3.0;
+        let (x, y) = (dragging.pointer.0 + (14.0 * scale).round(), dragging.pointer.1 + (6.0 * scale).round());
+        let [red, green, blue, _] = color(palette.background);
+        r.rect(x - line, y + line * 3.0, width + line * 4.0, height + line, [red / 2, green / 2, blue / 2, 70]);
+        r.rect(x - line, y - line, width + line * 2.0, height + line * 2.0, accent);
+        r.rect(x, y, width, height, color(palette.chrome_active));
+        r.text(&label, true, x + pad, y + ((height - metrics.height) / 2.0).round(), width, color(palette.foreground));
+    }
 }
 
 /// How long something has been going on, in the shortest readable form.
@@ -499,25 +645,41 @@ mod tests {
     }
 
     #[test]
-    fn a_dragged_row_lands_in_the_group_under_the_pointer() {
-        let mut model = model(2);
-        model.groups.push(Group { title: "blog".into(), workspace: Some(9), rows: vec![agent(2, 5)] });
+    fn a_dragged_row_lands_between_the_rows_under_the_pointer() {
+        // Tabs 1, 2, 3 in "shop"; tab 4 in "blog".
+        let mut model = model(0);
+        model.groups[0].rows = vec![agent(1, 10), agent(2, 20), agent(3, 30)];
+        model.groups.push(Group { title: "blog".into(), workspace: Some(9), rows: vec![agent(4, 40)] });
         // An empty group is not shown, so it cannot be a target.
         model.groups.push(Group { title: "empty".into(), workspace: Some(11), rows: Vec::new() });
         let area = Rect::new(0.0, 0.0, 260.0, 900.0);
         let (items, _) = layout(&model, area, CELL, 1.0, 0.0);
-        let headers: Vec<Rect> =
-            items.iter().filter(|p| matches!(p.item, Item::Header(_))).map(|p| p.rect).collect();
-        assert_eq!(headers.len(), 2);
-        let at = |y: f32| group_at(&model, area, CELL, 1.0, 0.0, 100.0, y);
-        // On a heading, on its rows, and below the last group.
-        assert_eq!(at(headers[0].y + 2.0), Some(7));
-        assert_eq!(at(headers[1].y - 2.0), Some(7));
-        assert_eq!(at(headers[1].y + 2.0), Some(9));
-        assert_eq!(at(headers[1].y + 200.0), Some(9));
-        // Above the first group, and outside the sidebar.
-        assert_eq!(at(headers[0].y - 2.0), None);
-        assert_eq!(group_at(&model, area, CELL, 1.0, 0.0, 400.0, headers[0].y + 2.0), None);
+        let rects = |header: bool| -> Vec<Rect> {
+            let wanted = |p: &&Placed| if header { matches!(p.item, Item::Header(_)) } else { matches!(p.item, Item::Row(_)) };
+            items.iter().filter(wanted).map(|p| p.rect).collect()
+        };
+        let (headers, rows) = (rects(true), rects(false));
+        assert_eq!((headers.len(), rows.len()), (2, 4));
+        let at = |y: f32, dragged: TabId| drop_at(&model, area, CELL, 1.0, 0.0, (100.0, y), dragged);
+        let spot = |workspace, before| Some(DropSpot { workspace, before });
+
+        // Tab 3 carried over the top half of tab 1 goes first; over the
+        // bottom half of tab 1, between 1 and 2.
+        assert_eq!(at(rows[0].y + 4.0, 3), spot(7, Some(1)));
+        assert_eq!(at(rows[0].y + rows[0].h - 4.0, 3), spot(7, Some(2)));
+        // Tab 1 carried below the group's last row goes to its end.
+        assert_eq!(at(rows[2].y + rows[2].h - 2.0, 1), spot(7, None));
+        // Either side of where it already is changes nothing.
+        assert_eq!(at(rows[1].y + 4.0, 2), None);
+        assert_eq!(at(rows[1].y + rows[1].h - 4.0, 2), None);
+        assert_eq!(at(rows[0].y + rows[0].h - 4.0, 2), None);
+        // Into another group: on its heading, on its row, below it.
+        assert_eq!(at(headers[1].y + 2.0, 1), spot(9, Some(4)));
+        assert_eq!(at(rows[3].y + rows[3].h - 4.0, 1), spot(9, None));
+        assert_eq!(at(rows[3].y + 300.0, 1), spot(9, None));
+        // Over the fixed controls, and outside the sidebar: nowhere.
+        assert_eq!(at(60.0, 1), None);
+        assert_eq!(drop_at(&model, area, CELL, 1.0, 0.0, (400.0, rows[0].y + 4.0), 3), None);
     }
 
     #[test]

@@ -54,6 +54,9 @@ pub struct TabBarView<'a> {
     pub active: usize,
     /// What the pointer is over, for showing a tab's close button.
     pub hovered: Option<TabBarHit>,
+    /// A tab being dragged along the bar: its position, and where its
+    /// left edge is held by the pointer.
+    pub dragged: Option<(usize, f32)>,
     /// The layout in use, shown selected in the switch.
     pub layout: AgentLayout,
     /// Seconds the pointer has been over the hovered tab: a title too long
@@ -184,7 +187,20 @@ impl TabBar {
     /// Draws the bar. Returns whether a hovered title is scrolling, and so
     /// needs drawing again shortly.
     pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) -> bool {
-        let TabBarView { workspace, titles, active, hovered, layout, hover_seconds } = *view;
+        let TabBarView { workspace, titles, active, hovered, dragged, layout, hover_seconds } = *view;
+        // The dragged tab leaves its slot and follows the pointer, kept
+        // within the row of tabs; nothing reacts to the pointer meanwhile.
+        let dragged = dragged.filter(|(index, _)| *index < self.tabs.len());
+        let hovered = if dragged.is_some() { None } else { hovered };
+        let (mut tabs, mut closes) = (self.tabs.clone(), self.close.clone());
+        if let (Some((index, x)), Some(first), Some(last)) = (dragged, self.tabs.first(), self.tabs.last()) {
+            let x = x.clamp(first.x, last.x).round();
+            closes[index].x += x - tabs[index].x;
+            tabs[index].x = x;
+        }
+        // Drawn last, so it passes over its neighbours.
+        let lifted = dragged.map(|(index, _)| index);
+        let order = (0..tabs.len().min(titles.len())).filter(|index| Some(*index) != lifted).chain(lifted);
         let hovered_tab = match hovered {
             Some(TabBarHit::Tab(index) | TabBarHit::Close(index)) => Some(index),
             _ => None,
@@ -203,16 +219,25 @@ impl TabBar {
         let label = fit(&Self::workspace_label(workspace), self.workspace.w - padding * 2.0, metrics.width);
         r.text(&label, true, self.workspace.x + padding, text_y, self.workspace.w - padding, color(palette.accent));
 
-        for (index, (tab, title)) in self.tabs.iter().zip(titles).enumerate() {
+        for index in order {
+            let (tab, title) = (tabs[index], &titles[index]);
             let is_active = index == active;
-            if is_active {
+            if lifted == Some(index) {
+                // Raised: a shadow to either side and an accent frame.
+                let [red, green, blue, _] = color(palette.background);
+                let shadow = (5.0 * scale).round();
+                r.rect(tab.x - shadow, tab.y, tab.w + shadow * 2.0, tab.h, [red / 2, green / 2, blue / 2, 70]);
+                r.rect(tab.x - line, tab.y, tab.w + line * 2.0, tab.h, color(palette.accent));
+                r.rect(tab.x, tab.y, tab.w, tab.h - line, color(palette.chrome_active));
+                r.rect(tab.x, tab.y, tab.w, line * 2.0, color(palette.accent));
+            } else if is_active {
                 // The active tab takes the terminal's background and covers
                 // the bar's bottom border, so it reads as part of the pane.
                 r.rect(tab.x, tab.y, tab.w, tab.h, color(palette.chrome_active));
                 r.rect(tab.x, tab.y, tab.w, line * 2.0, color(palette.accent));
                 r.rect(tab.x - line, tab.y, line, tab.h, color(palette.border));
                 r.rect(tab.x + tab.w - line, tab.y, line, tab.h, color(palette.border));
-            } else if index + 1 != active && index + 1 != self.tabs.len() {
+            } else if index + 1 != active && index + 1 != self.tabs.len() && lifted.is_none() {
                 // A short separator between two inactive tabs.
                 let inset = (tab.h * 0.3).round();
                 r.rect(tab.x + tab.w - line, tab.y + inset, line, tab.h - inset * 2.0, color(palette.border));
@@ -220,7 +245,7 @@ impl TabBar {
 
             let text_color = if is_active { palette.foreground } else { palette.chrome_text_dim };
             let mut x = tab.x + padding;
-            let close = self.close[index];
+            let close = closes[index];
             // The title stops short of the close button, shown or not, so
             // it does not shift when the mouse passes over.
             let right = if close.w > 0.0 { close.x - (4.0 * scale).round() } else { tab.x + tab.w - padding };
@@ -278,7 +303,7 @@ impl TabBar {
         }
 
         // Close buttons: on the active tab, and on the one under the mouse.
-        for (index, close) in self.close.iter().enumerate() {
+        for (index, close) in closes.iter().enumerate() {
             let over_tab = matches!(hovered, Some(TabBarHit::Tab(i) | TabBarHit::Close(i)) if i == index);
             if close.w <= 0.0 || !(index == active || over_tab) {
                 continue;

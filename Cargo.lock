@@ -131,6 +131,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "objc2 0.6.5",
  "pollster",
  "serde",
  "serde_json",
