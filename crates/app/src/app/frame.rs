@@ -78,6 +78,9 @@ impl App {
     /// program set, or else the command itself. Without integration we can
     /// only show the last title set, or the folder.
     pub(super) fn tab_title(&self, tab: &Tab) -> String {
+        if tab.start.is_some() {
+            return "New session".to_owned();
+        }
         if let Some(title) = &tab.custom_title {
             return title.clone();
         }
@@ -132,6 +135,7 @@ impl App {
                         .filter(|session| session.state == ale_agents::AgentState::Working)
                         .and_then(|session| session.activity.clone()),
                     dot: self.tab_state(tab).map(|state| crate::sidebar::state_color(state, &self.palette)),
+                    icon: session.map(|session| crate::icons::key(session.kind)),
                 }
             })
             .collect();
@@ -151,6 +155,7 @@ impl App {
         let scale = self.scale();
         let padding = self.padding();
         let window = self.window_size();
+        let content = self.content_rect();
         let Some(renderer) = self.renderer.as_mut() else { return };
         let palette = &self.palette;
         let metrics = renderer.metrics();
@@ -168,6 +173,16 @@ impl App {
             }
         }
         renderer.limit_image_memory(self.config.terminal.image_memory_mb as usize * 1024 * 1024);
+        // Agent icons, drawn at the text's size. Redone when that changes,
+        // or if the image budget above pushed one out.
+        let icon_size = renderer.metrics().height.round().max(8.0) as u32;
+        for kind in ale_agents::AgentKind::ALL {
+            let key = crate::icons::key(kind);
+            if self.icon_size != icon_size || !renderer.has_image(key) {
+                renderer.upload_image(key, icon_size, icon_size, &crate::icons::render(kind, icon_size));
+            }
+        }
+        self.icon_size = icon_size;
 
         renderer.begin(color(palette.background));
         for (id, rect) in &layout.panes {
@@ -191,11 +206,21 @@ impl App {
                 renderer.rect(rect.x, rect.y, rect.w, rect.h, [r, g, b, 70]);
             }
         }
+        // A tab that has not started anything yet shows the start page.
+        if let Some(page) = self.tabs.get(self.active).and_then(|tab| tab.start.as_ref()) {
+            crate::start::draw(renderer, page, &workspace_name, content, scale, palette);
+        }
         for divider in &layout.dividers {
             let Rect { x, y, w, h } = divider.rect;
             renderer.rect(x, y, w, h, color(palette.border));
         }
-        tab_bar.draw(renderer, &workspace_name, &titles, active_position, scale, palette);
+        let view = crate::chrome::TabBarView {
+            workspace: &workspace_name,
+            titles: &titles,
+            active: active_position,
+            hovered: self.mouse.hover_tab,
+        };
+        tab_bar.draw(renderer, &view, scale, palette);
         if let Some((rect, model)) = &graph {
             crate::graph::draw(renderer, model, *rect, scale, palette);
         }

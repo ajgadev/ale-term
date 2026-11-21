@@ -14,12 +14,14 @@ mod boxdraw;
 mod chrome;
 mod draw;
 mod graph;
+mod icons;
 mod input;
 mod layout;
 mod links;
 mod overlay;
 mod settings;
 mod sidebar;
+mod start;
 mod workspace;
 
 use std::path::PathBuf;

@@ -66,6 +66,8 @@ pub enum Row {
         elapsed: String,
         /// This is the pane the user is looking at.
         current: bool,
+        /// Image key of the agent's icon.
+        icon: u64,
     },
     /// A subagent, listed under its agent.
     Subagent {
@@ -331,7 +333,7 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 let label = fit(title, rect.w - pad * 2.0, cell.0);
                 r.text(&label, false, rect.x + pad, rect.y + rect.h - metrics.height - gap, rect.w, dim);
             }
-            Item::Row(Row::Agent { state, title, status, agent, elapsed, current, .. }) => {
+            Item::Row(Row::Agent { state, title, status, agent, elapsed, current, icon, .. }) => {
                 if *current {
                     r.rect(rect.x, rect.y, rect.w - line, rect.h, color(palette.background));
                     r.rect(rect.x, rect.y, line * 2.0, rect.h, color(palette.accent));
@@ -339,10 +341,17 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 let state_rgb = color(state_color(*state, palette));
                 let first = rect.y + gap * 1.5;
                 let second = first + metrics.height + gap;
-                let text_x = rect.x + pad + cell.0 * 2.0;
+                // The agent's icon, with a dot in its state's color.
+                let size = metrics.height.round();
+                let slot = size + (cell.0 * 0.75).round();
+                let text_x = rect.x + pad + slot;
                 let right = rect.x + rect.w - pad;
 
-                r.text("●", false, rect.x + pad, first, cell.0 * 2.0, state_rgb);
+                r.image(*icon, rect.x + pad, first, size, size, [0.0, 0.0, 1.0, 1.0]);
+                let radius = (3.0 * scale).round();
+                let behind = if *current { palette.background } else { palette.chrome };
+                crate::draw::dot(r, rect.x + pad + size, first + radius, radius + line, color(behind));
+                crate::draw::dot(r, rect.x + pad + size, first + radius, radius, state_rgb);
                 let elapsed_width = r.text_width(elapsed);
                 r.text(elapsed, false, right - elapsed_width, first, elapsed_width, dim);
                 let title = fit(title, right - elapsed_width - cell.0 - text_x, cell.0);
@@ -360,7 +369,7 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 }
             }
             Item::Row(Row::Subagent { text, running, .. }) => {
-                let text_x = rect.x + pad + cell.0 * 2.0;
+                let text_x = rect.x + pad + metrics.height.round() + (cell.0 * 0.75).round();
                 let label = fit(&format!("↳ {text}"), rect.x + rect.w - pad - text_x, cell.0);
                 r.text(&label, false, text_x, text_y, rect.w, if *running { fg } else { dim });
             }
@@ -408,6 +417,7 @@ mod tests {
             agent: "Claude Code".into(),
             elapsed: "3m".into(),
             current: false,
+            icon: 0,
         }
     }
 

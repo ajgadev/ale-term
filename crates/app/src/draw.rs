@@ -18,6 +18,18 @@ pub fn color(c: Rgb) -> Color {
     [c.r, c.g, c.b, 255]
 }
 
+/// A small filled circle, built from one-pixel-high strips.
+pub fn dot(r: &mut Renderer, center_x: f32, center_y: f32, radius: f32, fill: Color) {
+    let rows = radius.ceil() as i32;
+    for row in -rows..rows {
+        let y = row as f32 + 0.5;
+        let half = (radius * radius - y * y).max(0.0).sqrt().round();
+        if half > 0.0 {
+            r.rect(center_x.round() - half, center_y.round() + row as f32, half * 2.0, 1.0, fill);
+        }
+    }
+}
+
 pub struct PaneStyle<'a> {
     pub palette: &'a Palette,
     pub metrics: CellMetrics,

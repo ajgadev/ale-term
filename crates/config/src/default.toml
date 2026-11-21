@@ -36,11 +36,12 @@ image_memory_mb = 128
 # Show the sidebar listing agents and shells at launch (toggle: Cmd+B).
 sidebar = true
 sidebar_width = 260.0
-# Play a sound when an agent needs you or finishes.
+# Play a sound when an agent is stuck waiting for you (a permission prompt, a
+# question, an error). A finished turn never makes a sound.
 sound = true
 # Show a macOS notification for the same, when the window is not in front.
 notifications = true
-# What the "New session" button (Shift+Cmd+T) runs in a new tab.
+# The agent command the new-session page (Shift+Cmd+T) starts with.
 new_session_command = "claude"
 
 [theme]

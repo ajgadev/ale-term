@@ -87,7 +87,15 @@ impl App {
     pub(super) fn add_tab(&mut self, index: usize, pane: PaneId, workspace: WorkspaceId) -> usize {
         let id = self.next_id();
         let index = index.min(self.tabs.len());
-        let tab = Tab { id, workspace, root: Node::Leaf(pane), focused: pane, custom_title: None, pinned: false };
+        let tab = Tab {
+            id,
+            workspace,
+            root: Node::Leaf(pane),
+            focused: pane,
+            custom_title: None,
+            pinned: false,
+            start: None,
+        };
         self.tabs.insert(index, tab);
         // Keep pointing at the same tab if one was inserted before it.
         if index <= self.active && self.tabs.len() > 1 {
@@ -513,7 +521,9 @@ impl App {
         };
         let mut session = Session { version: SESSION_VERSION, active_workspace: 0, workspaces: Vec::new() };
         for workspace in &self.workspaces {
-            let tabs: Vec<&Tab> = self.tabs.iter().filter(|tab| tab.workspace == workspace.id).collect();
+            // A start page has nothing to restore.
+            let tabs: Vec<&Tab> =
+                self.tabs.iter().filter(|tab| tab.workspace == workspace.id && tab.start.is_none()).collect();
             if tabs.is_empty() {
                 continue;
             }

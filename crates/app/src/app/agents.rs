@@ -197,17 +197,10 @@ impl App {
         self.redraw();
     }
 
-    /// Opens a new tab and starts the configured agent in it.
+    /// Opens a new tab with the start page, where the user says what to
+    /// run: an agent on some task, or a plain terminal.
     pub(super) fn new_agent_session(&mut self) {
-        let command = self.config.agents.new_session_command.trim().to_owned();
-        let before = self.panes.len();
-        self.new_tab(None);
-        if self.panes.len() > before
-            && !command.is_empty()
-            && let Some(id) = self.focused_pane_id()
-        {
-            self.type_when_ready(id, format!("{command}\r").into_bytes());
-        }
+        self.open_start_page();
     }
 
     /// Takes a session out of the archive and continues it in a new tab,
@@ -300,7 +293,10 @@ impl App {
                 let looking = self.focused && self.focused_pane_id() == Some(pane_id) && !self.overlay.is_modal();
                 if looking {
                     self.mark_seen();
-                } else if state == AgentState::Done || state.wants_attention() {
+                } else if state.wants_attention() {
+                    // Only when the agent is stuck without the user. A
+                    // finished turn shows in the sidebar and on the tab,
+                    // quietly.
                     self.alert(pane_id, state);
                 }
             }
@@ -385,8 +381,7 @@ impl App {
         let now = Instant::now();
         if self.config.agents.sound && now.duration_since(self.last_sound) > Duration::from_millis(1500) {
             self.last_sound = now;
-            let sound = if state == AgentState::Done { "Glass" } else { "Funk" };
-            run_detached("afplay", &[&format!("/System/Library/Sounds/{sound}.aiff")]);
+            run_detached("afplay", &["/System/Library/Sounds/Funk.aiff"]);
         }
         if !self.focused {
             if let Some(window) = &self.window {
@@ -420,7 +415,6 @@ impl App {
         let title = session.and_then(|s| s.title.clone()).unwrap_or_else(|| name.to_owned());
         let detail = session.and_then(|s| s.activity.clone());
         let body = match (state, detail) {
-            (AgentState::Done, _) => format!("{name} finished"),
             (_, Some(detail)) => format!("{name}: {detail}"),
             (state, None) => format!("{name}: {}", state.label().to_lowercase()),
         };
@@ -533,6 +527,7 @@ impl App {
                     agent: if self.sidebar.by_status { workspace_name.to_owned() } else { session.kind.name().to_owned() },
                     elapsed: sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
                     current,
+                    icon: crate::icons::key(session.kind),
                 }];
                 for (index, subagent) in session.subagents.iter().enumerate() {
                     // Running ones, and those that finished a moment ago.

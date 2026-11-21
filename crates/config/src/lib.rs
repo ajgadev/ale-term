@@ -187,7 +187,8 @@ pub struct AgentsConfig {
     pub sidebar: bool,
     /// Sidebar width in points.
     pub sidebar_width: f32,
-    /// Play a sound when an agent needs you or finishes.
+    /// Play a sound when an agent is stuck waiting for you (a permission
+    /// prompt, a question, an error). A finished turn is always silent.
     pub sound: bool,
     /// Show a macOS notification when that happens while the window is not
     /// in front.

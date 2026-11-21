@@ -54,9 +54,9 @@ pub const SETTINGS: &[Setting] = &[
     Setting { section: "terminal", key: "image_memory_mb", group: "Terminal", label: "Image memory (MB)", kind: whole(32.0, 0.0, 4096.0), help: "Budget for inline images; the oldest are dropped beyond it." },
     Setting { section: "agents", key: "sidebar", group: "Agents", label: "Sidebar at launch", kind: Kind::Toggle, help: "Show the sidebar when the app starts. Cmd+B toggles it any time." },
     Setting { section: "agents", key: "sidebar_width", group: "Agents", label: "Sidebar width", kind: number(10.0, 160.0, 600.0), help: "In points." },
-    Setting { section: "agents", key: "sound", group: "Agents", label: "Sound", kind: Kind::Toggle, help: "Play a sound when an agent needs you or finishes." },
+    Setting { section: "agents", key: "sound", group: "Agents", label: "Sound", kind: Kind::Toggle, help: "Play a sound when an agent is stuck waiting for you." },
     Setting { section: "agents", key: "notifications", group: "Agents", label: "Notifications", kind: Kind::Toggle, help: "Notify when that happens and the window is not in front." },
-    Setting { section: "agents", key: "new_session_command", group: "Agents", label: "New session runs", kind: Kind::Text, help: "The command for the New session button (Shift+Cmd+T)." },
+    Setting { section: "agents", key: "new_session_command", group: "Agents", label: "New session agent", kind: Kind::Text, help: "The agent command the new-session page (Shift+Cmd+T) starts with." },
     Setting { section: "window", key: "restore", group: "Window", label: "Restore at launch", kind: Kind::Toggle, help: "Reopen the previous workspaces, tabs and splits." },
     Setting { section: "window", key: "renderer", group: "Window", label: "Renderer", kind: Kind::Choice(&["cpu", "gpu"]), help: "\"cpu\" uses the least memory. Takes effect at the next launch." },
 ];

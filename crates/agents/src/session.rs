@@ -191,13 +191,27 @@ pub struct Session {
     /// not guessed.
     pub hooked: bool,
     last_output: Option<Instant>,
-    last_input: Option<Instant>,
+    /// Output before this moment is a reaction to something the user or
+    /// the terminal did (typing, resizing, switching windows), not work.
+    settle_until: Option<Instant>,
+    /// The current run of closely spaced output: when it began and how
+    /// many times the pane has printed in it.
+    burst: Option<(Instant, u32)>,
 }
 
 /// Silence after which an agent without hooks is assumed to be idle.
 const QUIET_AFTER: Duration = Duration::from_millis(2500);
-/// Output this soon after a key press is just the key being echoed.
-const ECHO_WINDOW: Duration = Duration::from_millis(400);
+/// After the user types, or the pane is resized or regains focus, programs
+/// repaint. Output this soon afterwards is that, not work.
+const SETTLE: Duration = Duration::from_millis(700);
+/// Output counts as one continuous run while the gaps stay under this.
+const BURST_GAP: Duration = Duration::from_millis(600);
+/// A run must last this long, with at least this many updates, before it
+/// is taken for an agent working. An agent at work animates a spinner
+/// several times a second for as long as it works; an idle one only
+/// repaints now and then (a clock, a usage meter), which must not count.
+const BURST_DURATION: Duration = Duration::from_millis(1200);
+const BURST_UPDATES: u32 = 6;
 /// Most subagents remembered per session; the oldest finished ones go first.
 const MAX_SUBAGENTS: usize = 64;
 
@@ -218,7 +232,8 @@ impl Session {
             pending_launches: VecDeque::new(),
             hooked: false,
             last_output: None,
-            last_input: None,
+            settle_until: None,
+            burst: None,
         }
     }
 
@@ -249,20 +264,38 @@ impl Session {
     // ---- Guessing, for agents without hooks ---------------------------------
 
     /// The user typed into the pane.
+    /// The user typed into the pane.
     pub fn on_input(&mut self, now: Instant) {
-        self.last_input = Some(now);
+        self.on_disturbance(now);
+    }
+
+    /// Something made the program repaint: typing, a resize, the window
+    /// gaining or losing focus. What it prints next is not work.
+    pub fn on_disturbance(&mut self, now: Instant) {
+        self.settle_until = Some(now + SETTLE);
+        self.burst = None;
     }
 
     /// The pane printed something.
+    ///
+    /// Only sustained output counts as working; see `BURST_DURATION`.
     pub fn on_output(&mut self, now: Instant) -> Change {
-        if self.hooked {
+        if self.hooked || self.settle_until.is_some_and(|until| now < until) {
             return Change::None;
         }
-        if self.last_input.is_some_and(|input| now.duration_since(input) < ECHO_WINDOW) {
-            return Change::None;
-        }
+        let continues = self.last_output.is_some_and(|last| now.duration_since(last) <= BURST_GAP);
+        let (began, updates) = match self.burst {
+            Some((began, updates)) if continues => (began, updates + 1),
+            _ => (now, 1),
+        };
+        self.burst = Some((began, updates));
         self.last_output = Some(now);
-        if self.state == AgentState::Working { Change::None } else { self.set_state(AgentState::Working, now) }
+
+        let sustained = updates >= BURST_UPDATES && now.duration_since(began) >= BURST_DURATION;
+        if sustained && self.state != AgentState::Working {
+            return self.set_state(AgentState::Working, now);
+        }
+        Change::None
     }
 
     /// The pane rang the bell or asked for a notification: agents do that
@@ -272,6 +305,7 @@ impl Session {
             return Change::None;
         }
         self.last_output = None;
+        self.burst = None;
         self.set_state(AgentState::NeedsYou, now)
     }
 
@@ -505,46 +539,89 @@ mod tests {
         assert_eq!(AgentKind::from_slug("vim"), None);
     }
 
+    /// Prints every `step_ms` from `from` for `count` updates; returns the
+    /// changes seen and the time of the last update.
+    fn print(session: &mut Session, from: Instant, step_ms: u64, count: u64) -> (Vec<Change>, Instant) {
+        let mut changes = Vec::new();
+        let mut at = from;
+        for i in 0..count {
+            at = from + Duration::from_millis(i * step_ms);
+            let change = session.on_output(at);
+            if change != Change::None {
+                changes.push(change);
+            }
+        }
+        (changes, at)
+    }
+
     #[test]
-    fn without_hooks_output_means_working_and_silence_means_done() {
+    fn without_hooks_sustained_output_means_working_and_silence_means_done() {
         let start = Instant::now();
         let mut session = Session::new(AgentKind::Codex, start);
-        assert_eq!(session.on_output(start), Change::State(AgentState::Working));
-        assert_eq!(session.on_output(start + Duration::from_secs(1)), Change::None);
+        // A spinner: ten updates a second for three seconds.
+        let (changes, last) = print(&mut session, start, 100, 30);
+        assert_eq!(changes, [Change::State(AgentState::Working)]);
 
         // Still within the quiet period: asked to check back.
-        let (change, next) = session.tick(start + Duration::from_secs(2));
+        let (change, next) = session.tick(last + Duration::from_secs(1));
         assert_eq!(change, Change::None);
-        assert_eq!(next, Some(start + Duration::from_secs(1) + QUIET_AFTER));
+        assert_eq!(next, Some(last + QUIET_AFTER));
 
-        let (change, next) = session.tick(start + Duration::from_secs(4));
+        let (change, next) = session.tick(last + QUIET_AFTER);
         assert_eq!(change, Change::State(AgentState::Done));
         assert_eq!(next, None);
 
         // Looking at it clears "done".
-        assert_eq!(session.mark_seen(start + Duration::from_secs(5)), Change::State(AgentState::Idle));
-        assert_eq!(session.mark_seen(start + Duration::from_secs(6)), Change::None);
+        assert_eq!(session.mark_seen(last + Duration::from_secs(9)), Change::State(AgentState::Idle));
+        assert_eq!(session.mark_seen(last + Duration::from_secs(10)), Change::None);
     }
 
     #[test]
-    fn typing_echo_is_not_mistaken_for_work() {
+    fn an_idle_program_repainting_now_and_then_is_not_working() {
+        let start = Instant::now();
+        let mut session = Session::new(AgentKind::Claude, start);
+        // A status line refreshing every two seconds, for a minute.
+        let (changes, _) = print(&mut session, start, 2000, 30);
+        assert_eq!(changes, []);
+        // A quick burst (a full-screen repaint in several writes).
+        let (changes, _) = print(&mut session, start + Duration::from_secs(100), 20, 12);
+        assert_eq!(changes, []);
+        // Many updates, but spread too thin to be a spinner.
+        let (changes, _) = print(&mut session, start + Duration::from_secs(200), 700, 20);
+        assert_eq!(changes, []);
+        assert_eq!(session.state, AgentState::Idle);
+        assert_eq!(session.tick(start + Duration::from_secs(400)), (Change::None, None));
+    }
+
+    #[test]
+    fn repaints_after_typing_resizing_or_focus_are_not_work() {
         let start = Instant::now();
         let mut session = Session::new(AgentKind::Gemini, start);
-        session.on_input(start);
-        assert_eq!(session.on_output(start + Duration::from_millis(50)), Change::None);
+        // The user holds a key down for three seconds: every key press is
+        // echoed, which looks exactly like sustained output.
+        for i in 0..30 {
+            let at = start + Duration::from_millis(i * 100);
+            session.on_input(at);
+            assert_eq!(session.on_output(at + Duration::from_millis(20)), Change::None);
+        }
         assert_eq!(session.state, AgentState::Idle);
-        // Output well after the key press is the agent.
-        assert_eq!(session.on_output(start + Duration::from_secs(1)), Change::State(AgentState::Working));
+        // A resize repaint.
+        session.on_disturbance(start + Duration::from_secs(10));
+        let (changes, _) = print(&mut session, start + Duration::from_secs(10), 50, 10);
+        assert_eq!(changes, []);
+        // Real work afterwards is still noticed.
+        let (changes, _) = print(&mut session, start + Duration::from_secs(20), 100, 30);
+        assert_eq!(changes, [Change::State(AgentState::Working)]);
     }
 
     #[test]
     fn a_bell_means_the_agent_wants_the_user() {
         let start = Instant::now();
         let mut session = Session::new(AgentKind::Kiro, start);
-        session.on_output(start);
-        assert_eq!(session.on_attention(start), Change::State(AgentState::NeedsYou));
+        let (_, last) = print(&mut session, start, 100, 30);
+        assert_eq!(session.on_attention(last), Change::State(AgentState::NeedsYou));
         // Silence must not turn "needs you" into "done".
-        assert_eq!(session.tick(start + Duration::from_secs(60)).0, Change::None);
+        assert_eq!(session.tick(last + Duration::from_secs(60)).0, Change::None);
         assert_eq!(session.state, AgentState::NeedsYou);
     }
 
@@ -554,8 +631,9 @@ mod tests {
         let mut session = Session::new(AgentKind::Claude, start);
         session.note_common(&serde_json::json!({ "session_id": "s1", "cwd": "/repo" }));
         assert!(session.hooked);
-        assert_eq!(session.on_output(start), Change::None);
-        assert_eq!(session.on_attention(start), Change::None);
+        let (changes, last) = print(&mut session, start, 100, 30);
+        assert_eq!(changes, []);
+        assert_eq!(session.on_attention(last), Change::None);
         assert_eq!(session.state, AgentState::Idle);
         assert_eq!(session.session_id.as_deref(), Some("s1"));
     }

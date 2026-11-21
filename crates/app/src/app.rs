@@ -11,6 +11,7 @@ mod frame;
 mod graph_panel;
 mod mouse;
 mod overlays;
+mod start_page;
 mod workspaces;
 
 use std::collections::HashMap;
@@ -85,6 +86,9 @@ struct Tab {
     custom_title: Option<String>,
     /// Stays in its workspace even when its folder changes project.
     pinned: bool,
+    /// Set while the tab shows the start page instead of a terminal. Such
+    /// a tab has no pane yet; `root` holds a placeholder id.
+    start: Option<crate::start::StartPage>,
     root: Node,
     /// The pane that receives keyboard input.
     focused: PaneId,
@@ -110,6 +114,9 @@ struct Mouse {
     click_count: u8,
     /// Last cell reported to a mouse-tracking program, to avoid repeats.
     last_cell: Option<(PaneId, usize, usize)>,
+    /// The part of the tab bar under the pointer, for showing a tab's
+    /// close button.
+    hover_tab: Option<TabBarHit>,
 }
 
 /// A link under the mouse while Cmd is held.
@@ -165,6 +172,8 @@ pub struct App {
     last_sound: Instant,
     /// When the sidebar's elapsed times are next refreshed.
     elapsed_refresh: Option<Instant>,
+    /// Pixel size the agent icons were last drawn at.
+    icon_size: u32,
     /// When the last frame was drawn, and when a postponed one is due.
     last_frame: Instant,
     frame_due: Option<Instant>,
@@ -219,6 +228,7 @@ impl App {
             hooks_declined: false,
             last_sound: Instant::now(),
             elapsed_refresh: None,
+            icon_size: 0,
             last_frame: Instant::now() - FRAME_INTERVAL,
             frame_due: None,
             modifiers: ModifiersState::empty(),
@@ -229,6 +239,7 @@ impl App {
                 last_click: Instant::now(),
                 click_count: 0,
                 last_cell: None,
+                hover_tab: None,
             },
             overlay: Overlay::None,
             last_search: String::new(),
@@ -315,8 +326,16 @@ impl App {
     fn relayout(&mut self) {
         for tab in &self.tabs {
             for (id, rect) in self.tab_layout(tab).panes {
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.terminal.resize(self.grid_size(rect));
+                let size = self.grid_size(rect);
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    if pane.terminal.size() != size
+                        && let Some(session) = pane.agent.as_mut()
+                    {
+                        // The program will repaint for its new size; that
+                        // is not the agent working.
+                        session.on_disturbance(Instant::now());
+                    }
+                    pane.terminal.resize(size);
                 }
             }
         }
@@ -661,7 +680,13 @@ impl App {
             Action::PreviousPane => self.cycle_pane(-1),
             Action::FocusPane(direction) => self.focus_direction(direction),
             Action::Copy => self.copy(),
-            Action::Paste => self.paste(),
+            Action::Paste => {
+                // On a start page, pasting goes into its text box.
+                let pasted = get_clipboard().unwrap_or_default();
+                if !self.start_type(&pasted) {
+                    self.paste();
+                }
+            }
             Action::Find => self.open_search(),
             Action::FindNext => self.search_step(SearchDirection::Right, true),
             Action::FindPrevious => self.search_step(SearchDirection::Left, true),
@@ -719,6 +744,9 @@ impl App {
         }
         if let Some(action) = action {
             return self.perform(action, event_loop);
+        }
+        if self.start_key(event) {
+            return;
         }
         let Some(pane) = self.focused_pane() else { return };
         let mode = *pane.terminal.lock().mode();
@@ -941,6 +969,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ThemeChanged(_) => self.apply_theme(),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // Programs told about focus changes repaint.
+                let now = Instant::now();
+                for session in self.panes.values_mut().filter_map(|pane| pane.agent.as_mut()) {
+                    session.on_disturbance(now);
+                }
                 self.mark_seen();
                 // Tell programs that asked to know (e.g. editors that
                 // auto-save or dim on focus loss).
@@ -962,11 +995,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if self.overlay.is_open() {
                     self.overlay_type(&text);
-                } else {
+                } else if !self.start_type(&text) {
                     self.send_input(text.into_bytes());
                 }
             }
             WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position),
+            WindowEvent::CursorLeft { .. } => {
+                // No tab is under a pointer that is outside the window.
+                if self.mouse.hover_tab.take().is_some() {
+                    self.redraw();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.mouse_button(state, button, event_loop)
             }
@@ -1022,7 +1061,15 @@ impl ApplicationHandler<UserEvent> for App {
         {
             for step in std::mem::take(&mut self.options.script) {
                 if let Some(text) = step.strip_prefix("type:") {
-                    self.overlay_type(text);
+                    if self.overlay.is_open() {
+                        self.overlay_type(text);
+                    } else {
+                        self.start_type(text);
+                    }
+                } else if step == "start:go" {
+                    self.start_launch(true);
+                } else if step == "start:terminal" {
+                    self.start_launch(false);
                 } else if step == "enter" {
                     self.overlay_confirm(false, event_loop);
                 } else if let Some(change) = step.strip_prefix("setting:") {

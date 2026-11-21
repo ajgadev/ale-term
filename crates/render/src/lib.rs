@@ -151,6 +151,11 @@ impl Renderer {
         each!(self, r => r.upload_image(key, width, height, rgba))
     }
 
+    /// Whether an image is stored under `key`.
+    pub fn has_image(&self, key: u64) -> bool {
+        each!(self, r => r.has_image(key))
+    }
+
     pub fn remove_image(&mut self, key: u64) {
         each!(self, r => r.remove_image(key))
     }

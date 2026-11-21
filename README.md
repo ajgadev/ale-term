@@ -32,7 +32,7 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Cmd+B | Show or hide the sidebar |
 | Shift+Cmd+B | Show or hide the agent board |
 | Option+Cmd+G | Show or hide the agent graph beside the focused agent |
-| Shift+Cmd+T | New agent session (runs `new_session_command`, `claude` by default) |
+| Shift+Cmd+T | New session: a page to give an agent a task, or open a plain terminal |
 | Shift+Cmd+A | Go to the next agent that needs you |
 | Cmd+P | Switch workspace (also: click the workspace name) |
 | Ctrl+Cmd+Right / Left | Next / previous workspace |
@@ -54,7 +54,8 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Ctrl+Cmd+F | Full screen |
 
 Mouse: drag to select (double-click a word, triple-click a line), drag the
-line between panes to resize, middle-click a tab to close it. Hold Shift to
+line between panes to resize, click the × on a tab (or middle-click it) to
+close it. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
 address or file path to open it.
 
@@ -73,10 +74,20 @@ doing right now, and how long it has been in its current state:
 | Error / Rate limited | The turn ended with a failure or a usage limit |
 | Waiting on subagents | The main agent stopped; subagents are still running |
 
-Tabs holding an agent get a dot in the state's color. Click a row to jump to
-that pane. When an agent needs you or finishes while you are elsewhere,
-ale-term plays a sound and, if the window is not in front, shows a macOS
-notification (both can be turned off under `[agents]`).
+Tabs and sidebar rows for an agent show a small mark for that agent with a
+dot in the state's color. (The marks are simple shapes in each agent's
+color, not the vendors' logos.) Click a row to jump to that pane.
+
+When an agent is stuck waiting for you (a permission prompt, a question, an
+error) while you are elsewhere, ale-term plays a sound and, if the window is
+not in front, shows a macOS notification. Both can be turned off under
+`[agents]`. A finished turn is never announced; it shows as Done on the tab
+and in the sidebar.
+
+**New session** (Shift+Cmd+T, or the button at the top of the sidebar) opens
+a page asking what to build. Type a task and press Enter to start the
+selected agent on it; Tab switches agent; Cmd+Enter, or "or open a
+terminal", gives a plain shell instead. Nothing runs until you choose.
 
 How the status is known:
 
@@ -86,10 +97,13 @@ How the status is known:
   added to `~/.claude/settings.json`, keep your other settings, leave a
   backup next to the file, and do nothing outside ale-term. "Remove Claude
   Code Status Hooks" takes them out again.
-- **Codex, Gemini CLI, Kiro and OpenCode** are recognized by their command
-  and followed by watching the pane: output means working, silence means
-  done, and a bell or notification request means the agent wants you. This
-  cannot tell "finished" from "waiting for an answer" as reliably as hooks.
+- **Without hooks** (Codex, Gemini CLI, Kiro, OpenCode, and Claude Code
+  until its hooks are installed) the agent is recognized by its command and
+  followed by watching the pane. A steady stream of updates lasting over a
+  second (a spinner) means working, silence afterwards means done, and a
+  bell or notification request means the agent wants you. This is a guess:
+  it cannot tell "finished" from "waiting for an answer", and it shows
+  Idle for an agent that works without animating anything.
 
 Status travels over a Unix socket on this Mac; nothing uses the network.
 

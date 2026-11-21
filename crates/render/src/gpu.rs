@@ -390,6 +390,10 @@ impl GpuRenderer {
         self.image_bytes += bytes;
     }
 
+    pub fn has_image(&self, key: u64) -> bool {
+        self.images.contains_key(&key)
+    }
+
     pub fn remove_image(&mut self, key: u64) {
         if let Some(image) = self.images.remove(&key) {
             self.image_bytes -= image.bytes;

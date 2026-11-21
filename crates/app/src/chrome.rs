@@ -16,6 +16,7 @@ const TRAFFIC_LIGHTS: f32 = 78.0;
 const TAB_MAX_WIDTH: f32 = 240.0;
 const TAB_PADDING: f32 = 14.0;
 const WORKSPACE_MAX_WIDTH: f32 = 220.0;
+const CLOSE_SIZE: f32 = 20.0;
 
 pub struct TabBar {
     pub bar: Rect,
@@ -23,8 +24,21 @@ pub struct TabBar {
     /// workspace switcher.
     pub workspace: Rect,
     pub tabs: Vec<Rect>,
+    /// The close button of each tab, at its right end.
+    pub close: Vec<Rect>,
     /// The "+" button.
     pub new_tab: Rect,
+}
+
+/// What the tab bar shows at the moment.
+pub struct TabBarView<'a> {
+    /// Name of the workspace whose tabs these are.
+    pub workspace: &'a str,
+    pub titles: &'a [TabLabel],
+    /// Position of the tab on screen.
+    pub active: usize,
+    /// What the pointer is over, for showing a tab's close button.
+    pub hovered: Option<TabBarHit>,
 }
 
 /// What a tab shows.
@@ -34,11 +48,15 @@ pub struct TabLabel {
     pub detail: Option<String>,
     /// Color of the status dot, for tabs with an agent.
     pub dot: Option<ale_config::Rgb>,
+    /// Image key of the agent's icon (see `icons`), for tabs with one.
+    pub icon: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabBarHit {
     Tab(usize),
+    /// The close button of a tab.
+    Close(usize),
     NewTab,
     Workspace,
     /// Empty space, used for dragging the window.
@@ -71,13 +89,27 @@ impl TabBar {
         let available = (window_width - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
 
-        let tabs = (0..tab_count)
+        let tabs: Vec<Rect> = (0..tab_count)
             .map(|i| Rect::new(left + i as f32 * width, 0.0, width, height))
+            .collect();
+        // A square at the right end of each tab, unless tabs are too
+        // narrow to spare the room.
+        let close_size = (CLOSE_SIZE * scale).round();
+        let close = tabs
+            .iter()
+            .map(|tab| {
+                if tab.w < close_size * 3.0 {
+                    return Rect::default();
+                }
+                let x = tab.x + tab.w - close_size - (6.0 * scale).round();
+                Rect::new(x, ((height - close_size) / 2.0).round(), close_size, close_size)
+            })
             .collect();
         TabBar {
             bar: Rect::new(bar_x, 0.0, bar_width, height),
             workspace,
             tabs,
+            close,
             new_tab: Rect::new(left + tab_count as f32 * width, 0.0, button, height),
         }
     }
@@ -89,6 +121,9 @@ impl TabBar {
     pub fn hit(&self, x: f32, y: f32) -> Option<TabBarHit> {
         if !self.bar.contains(x, y) {
             return None;
+        }
+        if let Some(index) = self.close.iter().position(|close| close.contains(x, y)) {
+            return Some(TabBarHit::Close(index));
         }
         if let Some(index) = self.tabs.iter().position(|tab| tab.contains(x, y)) {
             return Some(TabBarHit::Tab(index));
@@ -107,15 +142,8 @@ impl TabBar {
         format!("{name} ▾")
     }
 
-    pub fn draw(
-        &self,
-        r: &mut Renderer,
-        workspace: &str,
-        titles: &[TabLabel],
-        active: usize,
-        scale: f32,
-        palette: &Palette,
-    ) {
+    pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) {
+        let TabBarView { workspace, titles, active, hovered } = *view;
         let metrics = r.metrics();
         let line = scale.round().max(1.0);
         let bar = self.bar;
@@ -146,12 +174,36 @@ impl TabBar {
 
             let text_color = if is_active { palette.foreground } else { palette.chrome_text_dim };
             let mut x = tab.x + padding;
-            let mut max_width = tab.w - padding * 2.0;
-            // A dot in the agent's state color, when the tab holds one.
-            if let Some(dot) = title.dot {
-                r.text("●", false, x, text_y, metrics.width * 2.0, color(dot));
-                x += metrics.width * 2.0;
-                max_width -= metrics.width * 2.0;
+            let close = self.close[index];
+            // The title stops short of the close button, shown or not, so
+            // it does not shift when the mouse passes over.
+            let right = if close.w > 0.0 { close.x - (4.0 * scale).round() } else { tab.x + tab.w - padding };
+            let mut max_width = (right - x).max(0.0);
+            // The agent's icon with a dot in its state's color, or just
+            // the dot when there is no icon.
+            match (title.icon, title.dot) {
+                (Some(icon), dot) => {
+                    let size = metrics.height.round();
+                    // The icon plus a little air before the title.
+                    let slot = size + (metrics.width * 0.75).round();
+                    let icon_y = ((bar.h - size) / 2.0).round();
+                    r.image(icon, x, icon_y, size, size, [0.0, 0.0, 1.0, 1.0]);
+                    if let Some(dot) = dot {
+                        let radius = (3.0 * scale).round();
+                        // Ringed in the tab's color so it reads over the icon.
+                        let behind = if is_active { palette.chrome_active } else { palette.chrome };
+                        crate::draw::dot(r, x + size, icon_y + radius, radius + line, color(behind));
+                        crate::draw::dot(r, x + size, icon_y + radius, radius, color(dot));
+                    }
+                    x += slot;
+                    max_width -= slot;
+                }
+                (None, Some(dot)) => {
+                    r.text("●", false, x, text_y, metrics.width * 2.0, color(dot));
+                    x += metrics.width * 2.0;
+                    max_width -= metrics.width * 2.0;
+                }
+                (None, None) => {}
             }
             let label = fit(&title.text, max_width, metrics.width);
             let used = r.text(&label, is_active, x, text_y, max_width, color(text_color));
@@ -163,6 +215,22 @@ impl TabBar {
                     r.text(&detail, false, x + used + metrics.width * 2.0, text_y, room, color(palette.chrome_text_dim));
                 }
             }
+        }
+
+        // Close buttons: on the active tab, and on the one under the mouse.
+        for (index, close) in self.close.iter().enumerate() {
+            let over_tab = matches!(hovered, Some(TabBarHit::Tab(i) | TabBarHit::Close(i)) if i == index);
+            if close.w <= 0.0 || !(index == active || over_tab) {
+                continue;
+            }
+            let over_button = hovered == Some(TabBarHit::Close(index));
+            if over_button {
+                r.rect(close.x, close.y, close.w, close.h, color(palette.border));
+            }
+            let glyph_x = close.x + ((close.w - metrics.width) / 2.0).round();
+            let glyph_y = close.y + ((close.h - metrics.height) / 2.0).round();
+            let glyph_color = if over_button { palette.foreground } else { palette.chrome_text_dim };
+            r.text("×", false, glyph_x, glyph_y, close.w, color(glyph_color));
         }
 
         let plus_x = self.new_tab.x + ((self.new_tab.w - metrics.width) / 2.0).round();
@@ -216,6 +284,15 @@ mod tests {
         let bar = TabBar::layout(2, 1000.0, 1.0, 0.0, true, 72.0);
         assert_eq!(bar.hit(100.0, 10.0), Some(TabBarHit::Workspace));
         assert_eq!(bar.hit(200.0, 10.0), Some(TabBarHit::Tab(0)));
+        // Each tab has a close button at its right end.
+        let close = bar.close[0];
+        assert!(close.x > bar.tabs[0].x + 150.0 && close.x + close.w <= bar.tabs[0].x + bar.tabs[0].w);
+        assert_eq!(bar.hit(close.x + 2.0, close.y + 2.0), Some(TabBarHit::Close(0)));
+        // Very narrow tabs have none, and the whole tab selects.
+        let crowded = TabBar::layout(40, 1000.0, 1.0, 0.0, true, 72.0);
+        assert_eq!(crowded.close[0].w, 0.0);
+        let first = crowded.tabs[0];
+        assert_eq!(crowded.hit(first.x + first.w - 2.0, 10.0), Some(TabBarHit::Tab(0)));
         assert_eq!(bar.hit(500.0, 10.0), Some(TabBarHit::Tab(1)));
         assert_eq!(bar.hit(670.0, 10.0), Some(TabBarHit::NewTab));
         assert_eq!(bar.hit(900.0, 10.0), Some(TabBarHit::Empty));

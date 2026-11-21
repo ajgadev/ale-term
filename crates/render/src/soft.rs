@@ -307,6 +307,10 @@ impl SoftRenderer {
         self.scene.epoch += 1;
     }
 
+    pub fn has_image(&self, key: u64) -> bool {
+        self.scene.images.contains_key(&key)
+    }
+
     pub fn remove_image(&mut self, key: u64) {
         if let Some(image) = self.scene.images.remove(&key) {
             self.image_bytes -= image.rgba.len();

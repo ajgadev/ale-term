@@ -156,6 +156,13 @@ impl App {
         if let Some(hit) = self.tab_bar().hit(x, y) {
             match (hit, mouse_button) {
                 (TabBarHit::Tab(index), MouseButton::Left) => self.select_tab(index),
+                (TabBarHit::Close(index), MouseButton::Left) => {
+                    if let Some(&tab) = self.visible_tabs().get(index)
+                        && self.close_tab(tab)
+                    {
+                        event_loop.exit();
+                    }
+                }
                 (TabBarHit::Tab(index), MouseButton::Middle) => {
                     if let Some(&tab) = self.visible_tabs().get(index)
                         && self.close_tab(tab)
@@ -177,6 +184,11 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        // The start page handles its own clicks.
+        if self.start_click(x, y) {
             return;
         }
 
@@ -281,6 +293,12 @@ impl App {
         }
 
         self.update_hover_link();
+        // Which tab the pointer is over decides where a close button shows.
+        let hover_tab = self.tab_bar().hit(x, y).filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_)));
+        if hover_tab != self.mouse.hover_tab {
+            self.mouse.hover_tab = hover_tab;
+            self.redraw();
+        }
 
         // Show what a click would do.
         let over_sidebar = self.sidebar_rect().is_some_and(|rect| rect.contains(x, y));
