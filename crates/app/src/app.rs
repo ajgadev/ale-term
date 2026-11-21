@@ -57,6 +57,14 @@ pub enum UserEvent {
     /// A status report from an agent's hook.
     Agent(ale_agents::HookMessage),
     ConfigChanged,
+    /// The agents found installed (see `ale_agents::available`).
+    AgentsFound(Vec<ale_agents::available::Installed>),
+    /// The files of a folder, for `@` references on start pages there.
+    FilesListed(PathBuf, Arc<Vec<String>>),
+    /// Files picked with a start page's paperclip, for that tab.
+    FilesChosen(TabId, Vec<PathBuf>),
+    /// The folder picked for a start page's session, for that tab.
+    FolderChosen(TabId, PathBuf),
 }
 
 struct Pane {
@@ -241,6 +249,11 @@ pub struct App {
     first_frame_logged: bool,
     /// The last frame showed a hovered tab's title scrolling.
     tab_scrolling: bool,
+    /// The agents installed on this Mac, once known; the start page offers
+    /// only these.
+    installed_agents: Option<Vec<ale_agents::available::Installed>>,
+    /// When the last check for installed agents started.
+    agents_checked: Option<Instant>,
 }
 
 impl App {
@@ -311,6 +324,8 @@ impl App {
             launched: Instant::now(),
             first_frame_logged: false,
             tab_scrolling: false,
+            installed_agents: None,
+            agents_checked: None,
         }
     }
 
@@ -1041,6 +1056,10 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Term(id, event) => self.term_event(id, event),
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Agent(message) => self.hook_message(message),
+            UserEvent::AgentsFound(found) => self.agents_found(found),
+            UserEvent::FilesListed(directory, files) => self.files_listed(&directory, files),
+            UserEvent::FilesChosen(tab, files) => self.files_chosen(tab, files),
+            UserEvent::FolderChosen(tab, folder) => self.start_set_folder(tab, folder),
         }
     }
 
@@ -1206,6 +1225,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.start_launch(false);
                 } else if step == "start:agents" {
                     self.open_agent_menu();
+                } else if step == "start:folder" {
+                    self.open_folder_menu();
                 } else if let Some(hover) = step.strip_prefix("hover-tab:") {
                     // "hover-tab:1:2.5": the pointer has rested on the
                     // second tab for two and a half seconds.

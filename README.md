@@ -93,6 +93,22 @@ press Tab) to pick another from a list; Cmd+Enter, or "or open a terminal",
 gives a plain shell instead. Nothing runs until you choose. Closing the last
 tab brings this page back instead of quitting; Cmd+Q quits.
 
+The list of agents shows only the ones installed on this Mac, each with
+where it was found. ale-term asks your login shell, the same one a tab runs,
+whether each agent's command exists, so agents installed through nvm,
+Homebrew, `~/.local/bin` or an alias are found even when the app is opened
+from the Finder. It asks again when a page opens, at most every 30 seconds,
+so a newly installed agent shows up.
+
+Type `@` to refer to a file in the session's folder: a list of its files
+narrows as you type, ↑↓ pick one and Enter or Tab puts its path in the
+prompt (`@src/main.rs`), which agents such as Claude Code read. In a git
+repository the list is git's own (ignored files are left out); elsewhere
+the folder is searched, skipping hidden and generated folders. The
+paperclip adds files chosen in the standard macOS open panel the same way.
+The folder below the box is where the session will run: click it to pick
+one of your workspaces' folders, or any other with "Choose folder…".
+
 How the status is known:
 
 - **Claude Code** reports it through hooks. ale-term offers to install them

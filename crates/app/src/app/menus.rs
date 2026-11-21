@@ -30,10 +30,19 @@ impl App {
             MenuKind::NewSession if index == menu::NEW_SESSION_TERMINAL => self.new_tab(None),
             MenuKind::NewSession => {}
             MenuKind::Agent => {
-                if let Some(agent) = ale_agents::AgentKind::ALL.get(index) {
-                    self.start_set_agent(*agent);
+                if let Some(agent) = menu.items.get(index).and_then(|item| item.agent) {
+                    self.start_set_agent(agent);
                 }
             }
+            MenuKind::Folder => match menu.items.get(index).map(|item| item.folder.clone()) {
+                Some(Some(folder)) => {
+                    if let Some(tab) = self.tabs.get(self.active).map(|tab| tab.id) {
+                        self.start_set_folder(tab, folder);
+                    }
+                }
+                Some(None) => self.choose_folder(),
+                None => {}
+            },
         }
         self.redraw();
     }

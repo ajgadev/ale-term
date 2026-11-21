@@ -237,7 +237,7 @@ impl App {
         }
         // A tab that has not started anything yet shows the start page.
         if let Some(page) = self.tabs.get(self.active).and_then(|tab| tab.start.as_ref()) {
-            crate::start::draw(renderer, page, start_view, &workspace_name, content, scale, palette);
+            crate::start::draw(renderer, page, start_view, content, scale, palette);
         }
         for divider in &layout.dividers {
             let Rect { x, y, w, h } = divider.rect;

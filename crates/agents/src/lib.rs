@@ -6,6 +6,7 @@
 //! back each session's state to draw.
 
 pub mod archive;
+pub mod available;
 pub mod channel;
 pub mod hooks;
 pub mod hooks_claude;

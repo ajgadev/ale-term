@@ -19,6 +19,8 @@ pub enum MenuKind {
     NewSession,
     /// Which agent the start page will run.
     Agent,
+    /// Which folder the start page's session runs in.
+    Folder,
 }
 
 /// One row of a menu.
@@ -30,6 +32,11 @@ pub struct MenuItem {
     pub icon: Option<u64>,
     /// Marks the current choice with a check.
     pub checked: bool,
+    /// The agent this row picks, in the agent menu.
+    pub agent: Option<AgentKind>,
+    /// The folder this row picks, in the folder menu. `None` on the row
+    /// that asks for one.
+    pub folder: Option<std::path::PathBuf>,
 }
 
 pub struct Menu {
@@ -53,6 +60,8 @@ impl Menu {
             detail: detail.into(),
             icon: None,
             checked: false,
+            agent: None,
+            folder: None,
         };
         Menu {
             kind: MenuKind::NewSession,
@@ -62,18 +71,48 @@ impl Menu {
         }
     }
 
-    pub fn agents(anchor: Rect, current: AgentKind) -> Menu {
-        let items = AgentKind::ALL
+    /// The agents to choose from, each with where it is installed (shown
+    /// dimmed; empty when not known).
+    pub fn agents(anchor: Rect, current: AgentKind, choices: &[(AgentKind, String)]) -> Menu {
+        let items = choices
             .iter()
-            .map(|kind| MenuItem {
+            .map(|(kind, location)| MenuItem {
                 label: kind.name().into(),
-                detail: String::new(),
+                detail: location.clone(),
                 icon: Some(crate::icons::key(*kind)),
                 checked: *kind == current,
+                agent: Some(*kind),
+                folder: None,
             })
             .collect();
-        let selected = AgentKind::ALL.iter().position(|kind| *kind == current).unwrap_or(0);
+        let selected = choices.iter().position(|(kind, _)| *kind == current).unwrap_or(0);
         Menu { kind: MenuKind::Agent, anchor, items, selected }
+    }
+
+    /// Folders to run a session in, `current` checked, and a last row that
+    /// asks for any other folder.
+    pub fn folders(anchor: Rect, current: &std::path::Path, choices: &[(String, std::path::PathBuf)]) -> Menu {
+        let mut items: Vec<MenuItem> = choices
+            .iter()
+            .map(|(label, path)| MenuItem {
+                label: label.clone(),
+                detail: String::new(),
+                icon: None,
+                checked: path == current,
+                agent: None,
+                folder: Some(path.clone()),
+            })
+            .collect();
+        items.push(MenuItem {
+            label: "Choose folder…".into(),
+            detail: String::new(),
+            icon: None,
+            checked: false,
+            agent: None,
+            folder: None,
+        });
+        let selected = items.iter().position(|item| item.checked).unwrap_or(0);
+        Menu { kind: MenuKind::Folder, anchor, items, selected }
     }
 
     pub fn step(&mut self, offset: isize) {
@@ -197,7 +236,8 @@ mod tests {
     #[test]
     fn flips_above_when_there_is_no_room_below() {
         let anchor = Rect::new(900.0, 660.0, 80.0, 28.0);
-        let menu = Menu::agents(anchor, AgentKind::Codex);
+        let all: Vec<(AgentKind, String)> = AgentKind::ALL.iter().map(|kind| (*kind, String::new())).collect();
+        let menu = Menu::agents(anchor, AgentKind::Codex, &all);
         let layout = MenuLayout::new(&menu, WINDOW, CELL, 1.0);
         assert!(layout.frame.y + layout.frame.h <= anchor.y);
         // And stays inside the window horizontally.
@@ -205,6 +245,18 @@ mod tests {
         // The current agent starts highlighted and checked.
         assert_eq!(menu.selected, 1);
         assert!(menu.items[1].checked && !menu.items[0].checked);
+    }
+
+    #[test]
+    fn the_agent_menu_lists_only_the_agents_given() {
+        let installed = [(AgentKind::Claude, "~/.local/bin/claude".to_owned()), (AgentKind::Kiro, "alias".to_owned())];
+        let menu = Menu::agents(Rect::default(), AgentKind::Kiro, &installed);
+        let agents: Vec<Option<AgentKind>> = menu.items.iter().map(|item| item.agent).collect();
+        assert_eq!(agents, [Some(AgentKind::Claude), Some(AgentKind::Kiro)]);
+        assert_eq!(menu.items[0].detail, "~/.local/bin/claude");
+        assert_eq!(menu.selected, 1);
+        // An agent that is not listed is not selected.
+        assert_eq!(Menu::agents(Rect::default(), AgentKind::Codex, &installed).selected, 0);
     }
 
     #[test]

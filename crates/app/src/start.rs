@@ -5,6 +5,7 @@
 //! live here; the app handles the keys and starts things.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ale_agents::AgentKind;
 use ale_config::Palette;
@@ -13,6 +14,7 @@ use ale_render::Renderer;
 use crate::draw::color;
 use crate::graph::wrap;
 use crate::layout::Rect;
+use crate::mention;
 
 /// The state of one start page.
 pub struct StartPage {
@@ -22,6 +24,40 @@ pub struct StartPage {
     pub agent: AgentKind,
     /// Where it will run.
     pub directory: PathBuf,
+    /// The folder's files, for `@` references; `None` while being listed.
+    pub files: Option<Arc<Vec<String>>>,
+    /// The highlighted file while an `@` reference is being typed.
+    pub suggestion: usize,
+    /// Esc closed the file list for the reference being typed.
+    pub suggestions_closed: bool,
+}
+
+/// At most this many files are offered for a reference.
+pub const SUGGESTIONS: usize = 8;
+
+impl StartPage {
+    pub fn new(agent: AgentKind, directory: PathBuf) -> Self {
+        StartPage { text: String::new(), agent, directory, files: None, suggestion: 0, suggestions_closed: false }
+    }
+
+    /// Whether an `@` reference is being typed and its list is open.
+    pub fn referencing(&self) -> bool {
+        !self.suggestions_closed && mention::query(&self.text).is_some()
+    }
+
+    /// The files offered for the `@` reference being typed, best first.
+    pub fn suggestions(&self) -> Vec<String> {
+        let (Some(query), Some(files), true) = (mention::query(&self.text), &self.files, self.referencing()) else {
+            return Vec::new();
+        };
+        mention::suggestions(files, query, SUGGESTIONS).into_iter().map(str::to_owned).collect()
+    }
+
+    /// The text changed: the file list opens again and starts at the top.
+    pub fn text_changed(&mut self) {
+        self.suggestion = 0;
+        self.suggestions_closed = false;
+    }
 }
 
 /// What a point on the page is.
@@ -35,6 +71,12 @@ pub enum Hit {
     Send,
     /// The text box (shows a text cursor).
     Input,
+    /// The paperclip: attach files as `@` references.
+    Attach,
+    /// The folder below the box: choose where the session runs.
+    Folder,
+    /// A file offered for the `@` reference being typed.
+    Suggestion(usize),
 }
 
 /// The name of the git branch checked out in `root`, read from the
@@ -69,10 +111,17 @@ struct Layout {
     input: Rect,
     agent: Rect,
     send: Rect,
+    attach: Rect,
+    folder: Rect,
+    /// Rows of the `@` file list, which opens below the box.
+    suggestions: Vec<Rect>,
     footer_y: f32,
 }
 
-fn layout(area: Rect, cell: (f32, f32), scale: f32, agent_label_cells: usize) -> Layout {
+/// Lays the page out. `suggestion_rows` is how many rows the `@` file
+/// list shows (0 when closed).
+fn layout(area: Rect, cell: (f32, f32), scale: f32, labels: (usize, usize), suggestion_rows: usize) -> Layout {
+    let (agent_label_cells, folder_label_cells) = labels;
     let gap = (6.0 * scale).round();
     let pad = (14.0 * scale).round();
     let width = (820.0 * scale).min(area.w - 48.0 * scale).max(cell.0 * 24.0).round();
@@ -94,7 +143,37 @@ fn layout(area: Rect, cell: (f32, f32), scale: f32, agent_label_cells: usize) ->
     let send = Rect::new(input.x + input.w - pad - send_size, row_y - gap, send_size, send_size);
     let agent_width = agent_label_cells as f32 * cell.0 + gap * 2.0;
     let agent = Rect::new(send.x - gap * 2.0 - agent_width, row_y - gap, agent_width, send_size);
-    Layout { heading_y, terminal, input, agent, send, footer_y: input.y + input.h + gap * 2.0 }
+    let attach = Rect::new(input.x + pad - gap, row_y - gap, send_size, send_size);
+    let footer_y = input.y + input.h + gap * 2.0;
+    let folder_width = (folder_label_cells as f32 * cell.0 + gap * 2.0).min(input.w * 0.6);
+    let folder = Rect::new(input.x - gap, footer_y - gap, folder_width, cell.1 + gap * 2.0);
+    let row_height = (cell.1 + gap * 1.5).round();
+    let list_width = (input.w - pad * 2.0).min(cell.0 * 72.0);
+    let suggestions = (0..suggestion_rows)
+        .map(|row| Rect::new(input.x + pad, input.y + input.h + line_gap(gap) + row as f32 * row_height, list_width, row_height))
+        .collect();
+    Layout { heading_y, terminal, input, agent, send, attach, folder, suggestions, footer_y }
+}
+
+/// Space between the box and the file list below it.
+fn line_gap(gap: f32) -> f32 {
+    (gap / 2.0).round()
+}
+
+/// The folder button's text.
+fn folder_label(page: &StartPage) -> String {
+    format!("📁 {} ▾", display_folder(&page.directory))
+}
+
+/// How many rows the file list takes: the files, or one line saying why
+/// there are none.
+fn suggestion_rows(page: &StartPage) -> usize {
+    if !page.referencing() { 0 } else { page.suggestions().len().max(1) }
+}
+
+fn page_layout(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Layout {
+    let labels = (agent_label(page.agent).chars().count(), folder_label(page).chars().count() + 1);
+    layout(area, cell, scale, labels, suggestion_rows(page))
 }
 
 /// The picker's text: icon space, name and a marker that it can change.
@@ -103,7 +182,12 @@ fn agent_label(agent: AgentKind) -> String {
 }
 
 pub fn hit(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32, x: f32, y: f32) -> Option<Hit> {
-    let layout = layout(area, cell, scale, agent_label(page.agent).chars().count());
+    let layout = page_layout(page, area, cell, scale);
+    // The file list lies over the footer, so it comes first.
+    let offered = page.suggestions().len();
+    if let Some(row) = layout.suggestions.iter().position(|row| row.contains(x, y)) {
+        return (row < offered).then_some(Hit::Suggestion(row));
+    }
     // Generous targets: a little slack around the link and buttons.
     let slack = 4.0 * scale;
     if layout.terminal.inflate(slack).contains(x, y) {
@@ -112,6 +196,10 @@ pub fn hit(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32, x: f32, y
         Some(Hit::Send)
     } else if layout.agent.contains(x, y) {
         Some(Hit::Agent)
+    } else if layout.attach.contains(x, y) {
+        Some(Hit::Attach)
+    } else if layout.folder.contains(x, y) {
+        Some(Hit::Folder)
     } else if layout.input.contains(x, y) {
         Some(Hit::Input)
     } else {
@@ -121,7 +209,12 @@ pub fn hit(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32, x: f32, y
 
 /// Where the agent picker is; its menu opens below it.
 pub fn agent_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Rect {
-    layout(area, cell, scale, agent_label(page.agent).chars().count()).agent
+    page_layout(page, area, cell, scale).agent
+}
+
+/// Where the folder button is; its menu opens below it.
+pub fn folder_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Rect {
+    page_layout(page, area, cell, scale).folder
 }
 
 /// How the page looks right now, beyond its own state.
@@ -131,9 +224,11 @@ pub struct View {
     pub hovered: Option<Hit>,
     /// The agent menu is open.
     pub picking: bool,
+    /// The folder menu is open.
+    pub picking_folder: bool,
 }
 
-pub fn draw(r: &mut Renderer, page: &StartPage, view: View, project: &str, area: Rect, scale: f32, palette: &Palette) {
+pub fn draw(r: &mut Renderer, page: &StartPage, view: View, area: Rect, scale: f32, palette: &Palette) {
     let metrics = r.metrics();
     let cell = (metrics.width, metrics.height);
     let line = scale.round().max(1.0);
@@ -142,7 +237,12 @@ pub fn draw(r: &mut Renderer, page: &StartPage, view: View, project: &str, area:
     let dim = color(palette.chrome_text_dim);
     let fg = color(palette.foreground);
     let label = agent_label(page.agent);
-    let layout = layout(area, cell, scale, label.chars().count());
+    let layout = page_layout(page, area, cell, scale);
+    // The project the session will run in: its repository's name, or the
+    // folder's.
+    let root = crate::workspace::project_root(&page.directory).unwrap_or_else(|| page.directory.clone());
+    let project = root.file_name().map_or_else(|| display_folder(&root), |name| name.to_string_lossy().into_owned());
+    let project = project.as_str();
 
     r.rect(area.x, area.y, area.w, area.h, color(palette.background));
 
@@ -212,18 +312,87 @@ pub fn draw(r: &mut Renderer, page: &StartPage, view: View, project: &str, area:
     let arrow_x = send.x + ((send.w - cell.0) / 2.0).round();
     r.text("↑", true, arrow_x, send.y + ((send.h - cell.1) / 2.0).round(), send.w, color(palette.background));
 
-    // Where it will run, and how to drive the page.
-    let folder = display_folder(&page.directory);
-    r.text(&folder, false, input.x, layout.footer_y, input.w * 0.6, dim);
+    // The paperclip, at the other end of the row.
+    let attach = layout.attach;
+    if view.hovered == Some(Hit::Attach) {
+        r.rect(attach.x, attach.y, attach.w, attach.h, color(palette.selection));
+    }
+    let clip_x = attach.x + ((attach.w - cell.0 * 2.0) / 2.0).round();
+    r.text("📎", false, clip_x, attach.y + ((attach.h - cell.1) / 2.0).round(), cell.0 * 2.0, fg);
+
+    // Where it will run (a button to choose), and how to drive the page.
+    let folder = layout.folder;
+    let folder_active = view.picking_folder || view.hovered == Some(Hit::Folder);
+    if folder_active {
+        r.rect(folder.x, folder.y, folder.w, folder.h, color(palette.selection));
+    }
+    let folder_text = folder_label(page);
+    r.text(&folder_text, false, folder.x + gap, layout.footer_y, folder.w - gap, if folder_active { fg } else { dim });
     if let Some(branch) = crate::workspace::project_root(&page.directory).as_deref().and_then(branch) {
         let text = format!("⎇ {branch}");
         let width = r.text_width(&text);
         r.text(&text, false, input.x + input.w - width, layout.footer_y, width, dim);
     }
-    let hints = "Enter start   ⇧Enter new line   Tab choose agent   ⌘Enter terminal";
+    let hints = if page.referencing() {
+        "↑↓ choose file   Enter or Tab insert   Esc close list"
+    } else {
+        "Enter start   ⇧Enter new line   @ file   Tab choose agent   ⌘Enter terminal"
+    };
     let hints_width = r.text_width(hints).min(input.w);
     let hints_x = area.x + ((area.w - hints_width) / 2.0).round();
-    r.text(hints, false, hints_x, layout.footer_y + cell.1 + gap * 3.0, hints_width, dim);
+    let hints_y = layout.footer_y + cell.1 + gap * 3.0;
+    let below_list = layout.suggestions.last().map_or(0.0, |row| row.y + row.h + gap * 2.0);
+    r.text(hints, false, hints_x, hints_y.max(below_list), hints_width, dim);
+
+    // The files for the `@` reference being typed, over the footer.
+    if let (Some(first), Some(last)) = (layout.suggestions.first(), layout.suggestions.last()) {
+        let frame = Rect::new(first.x, first.y, first.w, last.y + last.h - first.y);
+        r.rect(frame.x, frame.y, frame.w, frame.h, color(palette.chrome));
+        for (bx, by, bw, bh) in [
+            (frame.x, frame.y, frame.w, line),
+            (frame.x, frame.y + frame.h - line, frame.w, line),
+            (frame.x, frame.y, line, frame.h),
+            (frame.x + frame.w - line, frame.y, line, frame.h),
+        ] {
+            r.rect(bx, by, bw, bh, color(palette.border));
+        }
+        let files = page.suggestions();
+        let text_room = first.w - gap * 4.0;
+        if files.is_empty() {
+            let why = if page.files.is_none() { "Listing files…" } else { "No files match" };
+            r.text(why, false, first.x + gap * 2.0, first.y + ((first.h - cell.1) / 2.0).round(), text_room, dim);
+        }
+        for (index, (row, file)) in layout.suggestions.iter().zip(&files).enumerate() {
+            let selected = index == page.suggestion.min(files.len().saturating_sub(1));
+            let hovered = view.hovered == Some(Hit::Suggestion(index));
+            if selected || hovered {
+                r.rect(row.x + line, row.y, row.w - line * 2.0, row.h, color(palette.selection));
+            }
+            // The folder dimmed, the file's own name bright.
+            let text_y = row.y + ((row.h - cell.1) / 2.0).round();
+            let (folder, name) = match file.rfind('/') {
+                Some(at) => (&file[..=at], &file[at + 1..]),
+                None => ("", file.as_str()),
+            };
+            let shown_folder = fit_start(folder, (text_room - r.text_width(name)).max(0.0), cell.0);
+            let used = r.text(&shown_folder, false, row.x + gap * 2.0, text_y, text_room, dim);
+            r.text(name, selected, row.x + gap * 2.0 + used, text_y, text_room - used, fg);
+        }
+    }
+}
+
+/// Shortens `text` from the left ("…/src/") to fit `width`.
+fn fit_start(text: &str, width: f32, cell_width: f32) -> String {
+    let room = (width / cell_width).floor() as usize;
+    let count = text.chars().count();
+    if count <= room {
+        return text.to_owned();
+    }
+    if room <= 1 {
+        return String::new();
+    }
+    let tail: String = text.chars().skip(count - (room - 1)).collect();
+    format!("…{tail}")
 }
 
 /// A color a little closer to white, for a hovered button.
@@ -250,7 +419,7 @@ mod tests {
     const CELL: (f32, f32) = (8.0, 16.0);
 
     fn page() -> StartPage {
-        StartPage { text: String::new(), agent: AgentKind::Claude, directory: "/repo".into() }
+        StartPage::new(AgentKind::Claude, "/repo".into())
     }
 
     #[test]
@@ -286,7 +455,7 @@ mod tests {
     #[test]
     fn controls_are_inside_the_page_and_clickable() {
         let page = page();
-        let layout = layout(AREA, CELL, 1.0, agent_label(page.agent).chars().count());
+        let layout = page_layout(&page, AREA, CELL, 1.0);
         let at = |rect: Rect| hit(&page, AREA, CELL, 1.0, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(at(layout.terminal), Some(Hit::Terminal));
         assert_eq!(at(layout.send), Some(Hit::Send));
@@ -294,13 +463,47 @@ mod tests {
         assert_eq!(hit(&page, AREA, CELL, 1.0, layout.input.x + 20.0, layout.input.y + 20.0), Some(Hit::Input));
         assert_eq!(hit(&page, AREA, CELL, 1.0, AREA.x + 2.0, AREA.y + 2.0), None);
         assert_eq!(agent_button(&page, AREA, CELL, 1.0), layout.agent);
+        assert_eq!(at(layout.attach), Some(Hit::Attach));
+        assert_eq!(at(layout.folder), Some(Hit::Folder));
+        assert_eq!(folder_button(&page, AREA, CELL, 1.0), layout.folder);
+        // The paperclip sits at the left of the row, clear of the picker.
+        assert!(layout.attach.x >= layout.input.x && layout.attach.x + layout.attach.w <= layout.agent.x);
         // The picker and button sit inside the input box, side by side.
         assert!(layout.agent.x >= layout.input.x && layout.agent.x + layout.agent.w <= layout.send.x);
         assert!(layout.send.x + layout.send.w <= layout.input.x + layout.input.w);
         assert!(layout.input.x >= AREA.x && layout.input.x + layout.input.w <= AREA.x + AREA.w);
         // In a very small area nothing goes above it.
         let tiny = Rect::new(0.0, 0.0, 300.0, 120.0);
-        assert!(super::layout(tiny, CELL, 1.0, 10).heading_y >= 0.0);
+        assert!(super::layout(tiny, CELL, 1.0, (10, 10), 0).heading_y >= 0.0);
+    }
+
+    #[test]
+    fn typing_an_at_sign_offers_the_folders_files() {
+        let mut page = page();
+        page.files = Some(Arc::new(vec!["README.md".into(), "src/main.rs".into(), "src/start.rs".into()]));
+        assert!(!page.referencing() && page.suggestions().is_empty());
+        page.text = "fix @sta".into();
+        assert_eq!(page.suggestions(), ["src/start.rs"]);
+        // The list is clickable where it is drawn, over the footer.
+        let layout = page_layout(&page, AREA, CELL, 1.0);
+        assert_eq!(layout.suggestions.len(), 1);
+        let row = layout.suggestions[0];
+        assert_eq!(hit(&page, AREA, CELL, 1.0, row.x + 5.0, row.y + 5.0), Some(Hit::Suggestion(0)));
+        // Esc closes it until the text changes.
+        page.suggestions_closed = true;
+        assert!(page.suggestions().is_empty() && page_layout(&page, AREA, CELL, 1.0).suggestions.is_empty());
+        page.text_changed();
+        assert_eq!(page.suggestions().len(), 1);
+        // While the files are being listed, one row says so.
+        page.files = None;
+        assert_eq!(page_layout(&page, AREA, CELL, 1.0).suggestions.len(), 1);
+        assert_eq!(hit(&page, AREA, CELL, 1.0, row.x + 5.0, row.y + 5.0), None);
+    }
+
+    #[test]
+    fn long_folders_are_shortened_from_the_left() {
+        assert_eq!(fit_start("crates/app/src/", 80.0, 8.0), "…/app/src/");
+        assert_eq!(fit_start("src/", 80.0, 8.0), "src/");
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod icons;
 mod input;
 mod layout;
 mod links;
+mod mention;
 mod menu;
 mod overlay;
 mod settings;
