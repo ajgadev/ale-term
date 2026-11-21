@@ -131,6 +131,19 @@ struct Mouse {
 }
 
 /// A link under the mouse while Cmd is held.
+/// A picture shown while the pointer is over a mention of it.
+struct HoverPreview {
+    /// The file shown, and where in which pane it is mentioned.
+    source: PathBuf,
+    pane: PaneId,
+    start: Point,
+    end: Point,
+    /// Where the pointer was when the preview appeared.
+    anchor: (f32, f32),
+    /// Size of the (already shrunk) picture, in pixels.
+    size: (u32, u32),
+}
+
 struct HoverLink {
     pane: PaneId,
     /// First and last cell of the link, inclusive.
@@ -199,9 +212,14 @@ pub struct App {
     /// The last search text, so Find Next works after the bar is closed.
     last_search: String,
     hover_link: Option<HoverLink>,
+    hover_preview: Option<HoverPreview>,
+    /// Pictures saved from the clipboard for pasting; removed at exit.
+    pasted_files: Vec<PathBuf>,
     /// Folder with the shell integration script, when enabled and installed.
     integration: Option<PathBuf>,
     snapshot_at: Option<Instant>,
+    /// Test hook: where to pretend the pointer is when the snapshot is taken.
+    scripted_pointer: Option<(f32, f32)>,
     /// When the process started, to report time to first frame.
     launched: Instant,
     first_frame_logged: bool,
@@ -266,8 +284,11 @@ impl App {
             overlay: Overlay::None,
             last_search: String::new(),
             hover_link: None,
+            hover_preview: None,
+            pasted_files: Vec::new(),
             integration: None,
             snapshot_at: None,
+            scripted_pointer: None,
             launched: Instant::now(),
             first_frame_logged: false,
             tab_scrolling: false,
@@ -711,9 +732,9 @@ impl App {
             Action::Copy => self.copy(),
             Action::Paste => {
                 // On a start page, pasting goes into its text box.
-                let pasted = get_clipboard().unwrap_or_default();
+                let pasted = self.clipboard_for_paste().unwrap_or_default();
                 if !self.start_type(&pasted) {
-                    self.paste();
+                    self.paste_text(&pasted);
                 }
             }
             Action::Find => self.open_search(),
@@ -1038,13 +1059,20 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.mouse_button(state, button, event_loop)
             }
-            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.mouse_wheel(delta);
+                self.update_hover_link();
+            }
             _ => {}
         }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.save_session();
+        // Agents copy a pasted picture when it is pasted, so ours can go.
+        for path in self.pasted_files.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -1101,6 +1129,13 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         self.start_type(text);
                     }
+                } else if let Some(at) = step.strip_prefix("hover:") {
+                    // "hover:x,y" in window pixels.
+                    if let Some((x, y)) = at.split_once(',')
+                        && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
+                    {
+                        self.scripted_pointer = Some((x, y));
+                    }
                 } else if step == "start:go" {
                     self.start_launch(true);
                 } else if step == "start:terminal" {
@@ -1136,6 +1171,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(at) = self.snapshot_at {
             if Instant::now() >= at {
+                // A scripted pointer position applies to what is on screen
+                // now, wherever the real pointer happens to be.
+                if let Some(at) = self.scripted_pointer {
+                    (self.mouse.x, self.mouse.y) = at;
+                    self.update_hover_link();
+                }
                 self.take_snapshot();
                 event_loop.exit();
             } else {
@@ -1154,6 +1195,25 @@ fn set_clipboard(text: String) {
         Ok(()) => {}
         Err(e) => log::warn!("cannot copy to the clipboard: {e}"),
     }
+}
+
+/// What is on the clipboard besides text, as file paths: files copied in
+/// the Finder, or a copied picture (a screenshot, say), which is first
+/// saved as a PNG. Returns the paths and whether a file was created.
+fn clipboard_files() -> Option<(Vec<PathBuf>, bool)> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    if let Ok(files) = clipboard.get().file_list()
+        && !files.is_empty()
+    {
+        return Some((files, false));
+    }
+    if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
+        return None;
+    }
+    let picture = clipboard.get_image().ok()?;
+    let dir = crate::preview::paste_dir();
+    let path = crate::preview::save_png(&dir, picture.width as u32, picture.height as u32, &picture.bytes)?;
+    Some((vec![path], true))
 }
 
 fn get_clipboard() -> Option<String> {

@@ -47,6 +47,7 @@ impl App {
     pub(super) fn start_agent_server(&mut self) {
         let Some(state_dir) = self.state_dir.clone() else { return };
         channel::remove_stale_sockets(&state_dir);
+        crate::preview::remove_old_pastes(&crate::preview::paste_dir());
         let path = channel::socket_path(&state_dir);
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);

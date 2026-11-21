@@ -208,6 +208,8 @@ impl App {
             let Some(pane) = self.panes.get(id) else { continue };
             let is_focused = Some(*id) == focused_pane;
             let link = self.hover_link.as_ref().filter(|l| l.pane == *id).map(|l| (l.start, l.end));
+            // A mention whose picture is showing is underlined like a link.
+            let link = link.or(self.hover_preview.as_ref().filter(|p| p.pane == *id).map(|p| (p.start, p.end)));
             let style =
                 PaneStyle {
                 palette,
@@ -247,6 +249,16 @@ impl App {
         }
         if let Some((rect, model, scroll)) = &sidebar {
             crate::sidebar::draw(renderer, model, *rect, scale, *scroll, palette);
+        }
+        // The picture for the mention under the pointer, in a thin frame.
+        if let Some(preview) = &self.hover_preview {
+            let line = scale.round().max(1.0);
+            let (width, height) = (preview.size.0 as f32, preview.size.1 as f32);
+            let gap = (14.0 * scale).round();
+            let at = crate::preview::place(preview.anchor.0, preview.anchor.1, width, height, gap, window);
+            renderer.rect(at.x - line, at.y - line, at.w + line * 2.0, at.h + line * 2.0, color(palette.border));
+            renderer.rect(at.x, at.y, at.w, at.h, color(palette.chrome));
+            renderer.image(crate::preview::KEY, at.x, at.y, at.w, at.h, [0.0, 0.0, 1.0, 1.0]);
         }
         if let Some((rect, model, lights)) = &dock {
             crate::dock::draw(renderer, model, *rect, scale, *lights, palette);

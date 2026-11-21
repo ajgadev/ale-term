@@ -203,6 +203,18 @@ Both the iTerm2 protocol (`imgcat`) and the kitty graphics protocol
 (first frame). kitty's file and shared-memory transfer modes, animation and
 Unicode placeholders are not. Sixel is not supported.
 
+### Pictures and agents
+
+Cmd+V with a picture on the clipboard (a screenshot, say) saves it as a PNG
+in a private temporary folder and pastes that file's path; files copied in
+the Finder paste as their paths. Claude Code attaches a pasted image path
+as `[Image #N]`. The saved files are deleted when ale-term quits.
+
+Rest the pointer on an `[Image #N]` in a Claude Code pane to see the
+picture. It is read from Claude Code's own temporary folder, found exactly
+when the status hooks are installed and by project folder otherwise. With
+Cmd held, the path of any PNG, JPEG or GIF file previews the same way.
+
 ## Settings
 
 Cmd+, opens the settings screen: arrow keys to move and change values,

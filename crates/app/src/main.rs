@@ -22,6 +22,7 @@ mod links;
 mod menu;
 mod overlay;
 mod settings;
+mod preview;
 mod sidebar;
 mod start;
 mod workspace;

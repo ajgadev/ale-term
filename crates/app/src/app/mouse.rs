@@ -496,6 +496,81 @@ impl App {
         if changed {
             self.redraw();
         }
+        self.update_hover_preview();
+    }
+
+    /// Shows a picture while the pointer rests on a mention of it: an
+    /// `[Image #N]` in an agent's pane, or (with Cmd held, like any link)
+    /// the path of an image file.
+    fn update_hover_preview(&mut self) {
+        let found = self.preview_target();
+        let same = match (&found, &self.hover_preview) {
+            (None, None) => return,
+            (Some(a), Some(b)) => a.0 == b.source && a.1 == b.pane && a.2 == b.start,
+            _ => false,
+        };
+        let have_image = self.renderer.as_ref().is_some_and(|r| r.has_image(crate::preview::KEY));
+        if same && have_image {
+            return;
+        }
+        self.hover_preview = None;
+        let window = self.window_size();
+        if let Some((source, pane, start, end)) = found
+            && let Some(renderer) = self.renderer.as_mut()
+        {
+            // At most half the window either way, so it never hides
+            // everything.
+            let (max_w, max_h) = ((window.0 * 0.5) as u32, (window.1 * 0.5) as u32);
+            if let Some((width, height, pixels)) = crate::preview::load(&source, max_w.max(64), max_h.max(64)) {
+                renderer.upload_image(crate::preview::KEY, width, height, &pixels);
+                let anchor = (self.mouse.x, self.mouse.y);
+                self.hover_preview = Some(HoverPreview { source, pane, start, end, anchor, size: (width, height) });
+            }
+        }
+        if self.hover_preview.is_none()
+            && let Some(renderer) = self.renderer.as_mut()
+        {
+            renderer.remove_image(crate::preview::KEY);
+        }
+        self.redraw();
+    }
+
+    /// The picture mentioned under the pointer, if any: its file, and the
+    /// pane and cells of the mention.
+    fn preview_target(&self) -> Option<(PathBuf, PaneId, Point, Point)> {
+        if self.overlay.is_open() || !matches!(self.mouse.drag, Drag::None) {
+            return None;
+        }
+        if let Some(link) = &self.hover_link {
+            return match &link.target {
+                Target::File(path) if crate::preview::is_image(path) => {
+                    Some((path.clone(), link.pane, link.start, link.end))
+                }
+                _ => None,
+            };
+        }
+        let (x, y) = (self.mouse.x, self.mouse.y);
+        let layout = self.active_layout();
+        let pane_id = layout.pane_at(x, y)?;
+        let rect = layout.rect_of(pane_id)?;
+        let pane = self.panes.get(&pane_id)?;
+        let (column, line, _) = self.cell_at(pane_id, rect, x, y);
+        let (chars, points, at) = {
+            let term = pane.terminal.lock();
+            let point = term::viewport_to_point(term.grid().display_offset(), Point::new(line, Column(column)));
+            logical_line(&term, point)?
+        };
+        let (start, end, number) = crate::preview::image_tag_at(&chars, at)?;
+        // Where the agent keeps the picture. Only Claude Code is known.
+        let session = pane.agent.as_ref();
+        let cwd = session.and_then(|s| s.cwd.clone()).or_else(|| pane.terminal.working_directory());
+        let path = crate::preview::claude_image(
+            &crate::preview::claude_temp_dir(),
+            session.and_then(|s| s.session_id.as_deref()),
+            cwd.as_deref(),
+            number,
+        )?;
+        Some((path, pane_id, points[start], points[end - 1]))
     }
 
     /// Finds a link at a window position: an explicit hyperlink set by the
@@ -507,7 +582,6 @@ impl App {
         let point = term::viewport_to_point(term.grid().display_offset(), Point::new(line, Column(column)));
         let grid = term.grid();
         let last_column = term.last_column();
-        let wraps = |line: Line| grid[line][last_column].flags.contains(Flags::WRAPLINE);
 
         // Explicit hyperlink (OSC 8): covers the neighbouring cells that
         // carry the same address.
@@ -537,34 +611,7 @@ impl App {
 
         // Otherwise look at the text. A long address may be wrapped over
         // several rows, so gather the whole logical line first.
-        let mut first = point.line;
-        while first > term.topmost_line() && point.line - first < 20 && wraps(first - 1) {
-            first -= 1;
-        }
-        let mut last = point.line;
-        while last < term.bottommost_line() && last - point.line < 20 && wraps(last) {
-            last += 1;
-        }
-        let mut chars = Vec::new();
-        let mut points = Vec::new();
-        let mut at = None;
-        let mut current = first;
-        while current <= last {
-            for column in 0..term.columns() {
-                let cell = &grid[current][Column(column)];
-                let cell_point = Point::new(current, Column(column));
-                if cell_point == point {
-                    at = Some(chars.len());
-                }
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                chars.push(if cell.c == '\0' { ' ' } else { cell.c });
-                points.push(cell_point);
-            }
-            current += 1;
-        }
-        let at = at?.min(chars.len().checked_sub(1)?);
+        let (chars, points, at) = logical_line(&term, point)?;
         drop(term);
 
         let found = links::url_at(&chars, at).or_else(|| {
@@ -653,4 +700,42 @@ impl App {
             self.redraw();
         }
     }
+}
+
+/// The text of the logical line through `point` (a line the terminal
+/// wrapped over several rows counts as one), the cell each character sits
+/// in, and the index of the character at `point`.
+fn logical_line<T>(term: &ale_core::vt::Term<T>, point: Point) -> Option<(Vec<char>, Vec<Point>, usize)> {
+    let grid = term.grid();
+    let last_column = term.last_column();
+    let wraps = |line: Line| grid[line][last_column].flags.contains(Flags::WRAPLINE);
+        let mut first = point.line;
+        while first > term.topmost_line() && point.line - first < 20 && wraps(first - 1) {
+            first -= 1;
+        }
+        let mut last = point.line;
+        while last < term.bottommost_line() && last - point.line < 20 && wraps(last) {
+            last += 1;
+        }
+        let mut chars = Vec::new();
+        let mut points = Vec::new();
+        let mut at = None;
+        let mut current = first;
+        while current <= last {
+            for column in 0..term.columns() {
+                let cell = &grid[current][Column(column)];
+                let cell_point = Point::new(current, Column(column));
+                if cell_point == point {
+                    at = Some(chars.len());
+                }
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                chars.push(if cell.c == '\0' { ' ' } else { cell.c });
+                points.push(cell_point);
+            }
+            current += 1;
+        }
+        let at = at?.min(chars.len().checked_sub(1)?);
+    Some((chars, points, at))
 }

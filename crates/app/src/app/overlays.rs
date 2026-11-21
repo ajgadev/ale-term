@@ -298,11 +298,27 @@ impl App {
         }
     }
 
-    pub(super) fn paste(&mut self) {
+    /// What Cmd+V should insert: the clipboard's text, or for copied files
+    /// and pictures, their paths. A copied picture is saved to a private
+    /// temporary file first; agents such as Claude Code attach a pasted
+    /// image path as a picture.
+    pub(super) fn clipboard_for_paste(&mut self) -> Option<String> {
+        if let Some((paths, created)) = clipboard_files() {
+            if created {
+                self.pasted_files.extend(paths.iter().cloned());
+            }
+            return Some(crate::preview::paths_as_text(&paths));
+        }
+        get_clipboard()
+    }
+
+    pub(super) fn paste_text(&mut self, text: &str) {
         let Some(pane) = self.focused_pane() else { return };
-        let Some(text) = get_clipboard() else { return };
+        if text.is_empty() {
+            return;
+        }
         let mode = *pane.terminal.lock().mode();
-        self.send_input(input::encode_paste(&text, mode));
+        self.send_input(input::encode_paste(text, mode));
     }
 
     /// Cmd+K: forget the scrollback and ask the shell to redraw its prompt.
