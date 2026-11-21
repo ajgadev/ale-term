@@ -225,6 +225,18 @@ impl App {
     /// Saves a picture of the window (for automated visual checks).
     pub(super) fn take_snapshot(&mut self) {
         let Some(path) = self.options.snapshot.clone() else { return };
+        // First, what the window itself is showing after a normal draw.
+        if let Some(shown_path) = self.options.snapshot_shown.clone() {
+            self.build_frame();
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.present();
+                if let Some((width, height, rgba)) = renderer.capture_shown()
+                    && let Err(e) = write_bmp(&shown_path, width, height, &rgba)
+                {
+                    eprintln!("ale-term: cannot write {}: {e}", shown_path.display());
+                }
+            }
+        }
         // Twice: the first pass may fill the glyph atlas and ask for a redo.
         self.build_frame();
         self.build_frame();

@@ -8,5 +8,16 @@ license.workspace = true
 bytemuck = { version = "1.25.2", features = ["derive"] }
 cosmic-text = "0.19.0"
 log = "0.4.35"
+raw-window-handle = "0.6"
 unicode-width = "0.2.3"
 wgpu = { version = "30.0.2", default-features = false, features = ["std", "metal", "vulkan", "wgsl", "parking_lot"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+softbuffer = { version = "0.4.8", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-foundation = "0.3"
+objc2-io-surface = "0.3"
+objc2-quartz-core = "0.3"

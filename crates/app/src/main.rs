@@ -31,6 +31,8 @@ pub struct Options {
     pub working_directory: Option<PathBuf>,
     /// Save a picture of the window to this BMP file, then quit.
     pub snapshot: Option<PathBuf>,
+    /// Also save what is actually on the window's surface at that moment.
+    pub snapshot_shown: Option<PathBuf>,
     /// How long to wait before taking the snapshot, in milliseconds.
     pub snapshot_delay_ms: u64,
     /// Text typed into the first pane at startup (`\n` presses Enter).
@@ -57,6 +59,7 @@ fn parse_args() -> Result<Options, String> {
         match arg.as_str() {
             "--cwd" => options.working_directory = Some(value("--cwd")?.into()),
             "--snapshot" => options.snapshot = Some(value("--snapshot")?.into()),
+            "--snapshot-shown" => options.snapshot_shown = Some(value("--snapshot-shown")?.into()),
             "--snapshot-delay" => {
                 options.snapshot_delay_ms =
                     value("--snapshot-delay")?.parse().map_err(|_| "--snapshot-delay needs a number")?;

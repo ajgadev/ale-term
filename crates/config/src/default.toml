@@ -15,6 +15,10 @@ height = 700.0
 padding = 8.0
 # Reopen the previous workspaces, tabs and splits at launch.
 restore = true
+# How the window is drawn: "cpu" uses the least memory; "gpu" is faster for
+# very large windows under heavy output but uses about 90 MB more while the
+# screen is changing. Takes effect at the next launch.
+renderer = "cpu"
 
 [terminal]
 scrollback = 10000

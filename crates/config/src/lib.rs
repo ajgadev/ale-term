@@ -123,11 +123,25 @@ pub struct WindowConfig {
     pub padding: f32,
     /// Reopen the previous workspaces, tabs and splits at launch.
     pub restore: bool,
+    /// How the window is drawn. Takes effect at the next launch.
+    pub renderer: RendererChoice,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RendererChoice {
+    /// Paint on the CPU: least memory.
+    #[default]
+    Cpu,
+    /// Draw with the graphics card: fastest for huge windows under heavy
+    /// output, but the graphics driver holds about 90 MB while the screen
+    /// is changing.
+    Gpu,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { width: 1100.0, height: 700.0, padding: 8.0, restore: true }
+        Self { width: 1100.0, height: 700.0, padding: 8.0, restore: true, renderer: RendererChoice::Cpu }
     }
 }
 

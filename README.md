@@ -141,12 +141,23 @@ Unicode placeholders are not. Sixel is not supported.
 `~/.config/ale-term/config.toml`, created on first run with every option
 documented. Changes apply when the file is saved.
 
+## Rendering and memory
+
+By default the window is painted on the CPU into memory shared with the
+macOS compositor, repainting only the parts that changed. This keeps memory
+low (about 45 MB with a tab open, whether idle or busy).
+
+Set `renderer = "gpu"` under `[window]` to draw with the graphics card
+instead. That is faster for very large windows under heavy output, but on
+Apple GPUs the graphics driver holds about 90 MB of working memory while the
+screen is changing (about 150 MB in total).
+
 ## Layout
 
 | Crate | Role |
 |---|---|
 | `crates/core` | Shell sessions: PTY plus terminal emulation (`alacritty_terminal`) |
-| `crates/render` | GPU drawing of rectangles and glyphs (`wgpu`, `cosmic-text`) |
+| `crates/render` | Drawing rectangles, glyphs and images: a CPU renderer (default) and a GPU one (`wgpu`); text via `cosmic-text` |
 | `crates/config` | Config file and themes |
 | `crates/agents` | Agent detection, status reports and session state |
 | `crates/app` | Window, tabs, splits, keyboard and mouse |

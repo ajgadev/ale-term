@@ -29,8 +29,23 @@ pub struct RasterGlyph {
     pub height: u32,
     /// True for color glyphs (emoji); false for masks to be tinted.
     pub color: bool,
-    /// RGBA pixels, `width * height * 4` bytes.
-    pub rgba: Vec<u8>,
+    /// Pixels: for a mask, one coverage byte per pixel; for a color glyph,
+    /// four bytes (RGBA) per pixel.
+    pub data: Vec<u8>,
+}
+
+impl RasterGlyph {
+    /// The pixels as RGBA, with a mask expanded to white plus alpha.
+    pub fn rgba(&self) -> std::borrow::Cow<'_, [u8]> {
+        if self.color {
+            return std::borrow::Cow::Borrowed(&self.data);
+        }
+        let mut rgba = Vec::with_capacity(self.data.len() * 4);
+        for alpha in &self.data {
+            rgba.extend_from_slice(&[255, 255, 255, *alpha]);
+        }
+        std::borrow::Cow::Owned(rgba)
+    }
 }
 
 pub struct FontStack {
@@ -126,14 +141,8 @@ impl FontStack {
                 if width == 0 || height == 0 {
                     continue;
                 }
-                let (color, rgba) = match image.content {
-                    SwashContent::Mask => {
-                        let mut rgba = Vec::with_capacity(image.data.len() * 4);
-                        for alpha in &image.data {
-                            rgba.extend_from_slice(&[255, 255, 255, *alpha]);
-                        }
-                        (false, rgba)
-                    }
+                let (color, data) = match image.content {
+                    SwashContent::Mask => (false, image.data),
                     SwashContent::Color => (true, image.data),
                     // Subpixel masks are never requested.
                     SwashContent::SubpixelMask => continue,
@@ -144,7 +153,7 @@ impl FontStack {
                     width,
                     height,
                     color,
-                    rgba,
+                    data,
                 });
             }
         }

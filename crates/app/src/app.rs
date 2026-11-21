@@ -27,7 +27,7 @@ use ale_core::vt::selection::{Selection, SelectionType};
 use ale_core::vt::term::{self, TermMode};
 use ale_core::vt::vte::ansi::{Color as AnsiColor, NamedColor, Rgb as AnsiRgb};
 use ale_core::{GridSize, SpawnOptions, TermEvent, Terminal};
-use ale_render::{FontSpec, Renderer};
+use ale_render::{Backend, FontSpec, Renderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -120,6 +120,9 @@ struct HoverLink {
     target: Target,
 }
 
+/// The shortest time between two frames: 120 frames a second at most.
+const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+
 pub struct App {
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -158,6 +161,9 @@ pub struct App {
     last_sound: Instant,
     /// When the sidebar's elapsed times are next refreshed.
     elapsed_refresh: Option<Instant>,
+    /// When the last frame was drawn, and when a postponed one is due.
+    last_frame: Instant,
+    frame_due: Option<Instant>,
 
     modifiers: ModifiersState,
     mouse: Mouse,
@@ -206,6 +212,8 @@ impl App {
             hooks_declined: false,
             last_sound: Instant::now(),
             elapsed_refresh: None,
+            last_frame: Instant::now() - FRAME_INTERVAL,
+            frame_due: None,
             modifiers: ModifiersState::empty(),
             mouse: Mouse {
                 x: 0.0,
@@ -789,19 +797,29 @@ impl ApplicationHandler<UserEvent> for App {
 
         let size = window.inner_size();
         let started = Instant::now();
-        let renderer = pollster::block_on(Renderer::new(
-            window.clone(),
-            size.width,
-            size.height,
-            &self.font_spec(),
-        ));
-        log::info!("renderer ready in {:?}", started.elapsed());
-        match renderer {
-            Ok(renderer) => self.renderer = Some(renderer),
-            Err(e) => {
-                eprintln!("ale-term: cannot set up the GPU: {e}");
-                return event_loop.exit();
+        // Use the configured renderer; if it cannot start, try the other
+        // before giving up.
+        let wanted = match self.config.window.renderer {
+            ale_config::RendererChoice::Cpu => Backend::Cpu,
+            ale_config::RendererChoice::Gpu => Backend::Gpu,
+        };
+        let other = if wanted == Backend::Cpu { Backend::Gpu } else { Backend::Cpu };
+        let font = self.font_spec();
+        for backend in [wanted, other] {
+            let result =
+                pollster::block_on(Renderer::new(window.clone(), size.width, size.height, &font, backend));
+            match result {
+                Ok(renderer) => {
+                    self.renderer = Some(renderer);
+                    break;
+                }
+                Err(e) => log::warn!("the {backend:?} renderer is unavailable: {e}"),
             }
+        }
+        log::info!("renderer ready in {:?}", started.elapsed());
+        if self.renderer.is_none() {
+            eprintln!("ale-term: cannot draw to the window with either renderer");
+            return event_loop.exit();
         }
 
         if self.config.terminal.shell_integration
@@ -857,7 +875,20 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                // Pace frames: during a burst of output, redraw requests
+                // arrive far faster than a screen can show. Drawing each
+                // one would only burn CPU, so a request that comes too
+                // soon after the last frame waits its turn.
+                let earliest = self.last_frame + FRAME_INTERVAL;
+                if Instant::now() < earliest {
+                    self.frame_due = Some(earliest);
+                } else {
+                    self.frame_due = None;
+                    self.last_frame = Instant::now();
+                    self.draw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
@@ -916,6 +947,15 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(at) = self.save_at {
             if Instant::now() >= at {
                 self.save_session();
+            } else {
+                wake_at(at);
+            }
+        }
+        // Draw the frame that was postponed by pacing.
+        if let Some(at) = self.frame_due {
+            if Instant::now() >= at {
+                self.frame_due = None;
+                self.redraw();
             } else {
                 wake_at(at);
             }
