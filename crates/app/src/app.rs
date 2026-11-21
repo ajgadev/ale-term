@@ -242,6 +242,8 @@ pub struct App {
     /// Folder with the shell integration script, when enabled and installed.
     integration: Option<PathBuf>,
     snapshot_at: Option<Instant>,
+    /// A `wait:` script step postponed the remaining steps until then.
+    script_resume: Option<Instant>,
     /// Test hook: where to pretend the pointer is when the snapshot is taken.
     scripted_pointer: Option<(f32, f32)>,
     /// When the process started, to report time to first frame.
@@ -320,6 +322,7 @@ impl App {
             pasted_files: Vec::new(),
             integration: None,
             snapshot_at: None,
+            script_resume: None,
             scripted_pointer: None,
             launched: Instant::now(),
             first_frame_logged: false,
@@ -1192,8 +1195,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(at) = self.snapshot_at
             && !self.options.script.is_empty()
             && Instant::now() >= self.script_time(at)
+            && self.script_resume.is_none_or(|resume| Instant::now() >= resume)
         {
-            for step in std::mem::take(&mut self.options.script) {
+            self.script_resume = None;
+            let mut steps = std::mem::take(&mut self.options.script).into_iter();
+            while let Some(step) = steps.next() {
+                if let Some(ms) = step.strip_prefix("wait:") {
+                    // "wait:2500": the steps after this run 2.5 seconds
+                    // later (say, once every shell has started).
+                    let ms = ms.parse().unwrap_or(0);
+                    self.script_resume = Some(Instant::now() + Duration::from_millis(ms));
+                    self.options.script = steps.by_ref().collect();
+                    break;
+                }
                 if let Some(text) = step.strip_prefix("type:") {
                     if self.overlay.is_open() {
                         self.overlay_type(text);
@@ -1235,6 +1249,8 @@ impl ApplicationHandler<UserEvent> for App {
                     let seconds = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0.0);
                     self.mouse.hover_tab = Some(TabBarHit::Tab(index));
                     self.mouse.hover_tab_since = Instant::now() - Duration::from_secs_f32(seconds);
+                } else if step == "demo:tabs" {
+                    self.demo_tabs();
                 } else if step == "demo:agents" {
                     self.demo_agents();
                 } else if step == "sidebar:new" {
@@ -1265,7 +1281,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.take_snapshot();
                 event_loop.exit();
             } else {
-                wake_at(if self.options.script.is_empty() { at } else { self.script_time(at) });
+                let steps_at = self.script_resume.map_or(self.script_time(at), |resume| resume.max(self.script_time(at)));
+                wake_at(if self.options.script.is_empty() { at } else { steps_at });
             }
         }
         event_loop.set_control_flow(match wake {

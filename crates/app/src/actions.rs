@@ -237,6 +237,24 @@ pub fn search(query: &str) -> Vec<&'static (Action, &'static str, &'static str)>
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_command_is_listed_in_the_readme_with_its_shortcut() {
+        let readme = include_str!("../../../README.md");
+        let table = readme
+            .split("<!-- commands:start -->")
+            .nth(1)
+            .and_then(|rest| rest.split("<!-- commands:end -->").next())
+            .expect("README.md has a commands section");
+        for (_, name, keys) in COMMANDS {
+            let shortcut = if keys.is_empty() { String::new() } else { format!("`{keys}`") };
+            let row = format!("| {name} | {shortcut} |");
+            assert!(
+                table.lines().any(|line| line == row),
+                "README.md does not list {name:?} with {keys:?}: run python3 scripts/readme-commands.py"
+            );
+        }
+    }
+
     fn key(text: &str, mods: ModifiersState) -> Option<Action> {
         from_key(&Key::Character(text.into()), PhysicalKey::Code(KeyCode::KeyA), mods)
     }

@@ -1,67 +1,185 @@
 # ale-term
 
-A fast, private terminal for macOS built for working with coding agents.
-No telemetry and no network access: the app never opens a connection.
+**A fast, private terminal for macOS, built for working with coding agents.**
 
-A terminal with tabs, splits and a workspace per project, plus a sidebar,
-board and graph showing what each coding agent is doing. About 45 MB of
-memory with a tab open, and a first frame in about 120 ms.
+Tabs, splits and a workspace per project, plus a sidebar, a board and a graph
+that show what every coding agent is doing: which one is working, which one
+has finished, and which one is waiting for you. No telemetry and no network
+access: the app never opens a connection. About 45 MB of memory with a tab
+open, and a first frame in about 120 ms.
 
-## Build and run
+![The board layout: every agent as a card, in columns by what it needs, above the tabs](assets/screenshots/board.png)
 
-Needs macOS and a Rust toolchain (`brew install rustup && rustup default
-stable`).
+- **Agent status at a glance**: working, needs you, done or idle, for Claude
+  Code and Kiro (reported by their hooks) and Codex, Gemini CLI and OpenCode
+  (followed by watching the pane).
+- **Two layouts**: a sidebar grouped by project or by status, or a board of
+  cards docked above the tabs.
+- **A start page for new sessions**: type a task, pick one of the agents
+  installed on this Mac, and refer to files with `@`.
+- **The agent graph**: Claude Code's subagents and background tasks as a
+  tree, with what each was asked and what it answered.
+- **A complete terminal underneath**: workspaces with templates, session
+  restore, search, prompt jumping, inline images and Cmd-click links.
 
-    ./scripts/bundle.sh                 # builds target/release/ale-term.app
-    open target/release/ale-term.app
+## Contents
 
-To keep it, drag `target/release/ale-term.app` into Applications. The app
-is signed for this Mac only; to give it to someone else, have them build it
-or sign it with a Developer ID.
+- [Quick start](#quick-start)
+- [Commands and shortcuts](#commands-and-shortcuts)
+- [Command line](#command-line)
+- [Agents](#agents)
+- [Workspaces](#workspaces)
+- [Shell integration](#shell-integration)
+- [Inline images](#inline-images)
+- [Settings](#settings)
+- [Privacy](#privacy)
+- [Rendering and memory](#rendering-and-memory)
+- [Development](#development)
+- [License](#license)
 
-During development: `cargo run -p ale-term`, and `cargo test --workspace`.
-`scripts/make-icon.py` regenerates the app icon.
+## Quick start
 
-## Shortcuts
+> Needs macOS and a Rust toolchain: `brew install rustup && rustup default stable`.
 
-Every command is also in the command palette (Shift+Cmd+P).
+```sh
+./scripts/bundle.sh                # builds target/release/ale-term.app
+open target/release/ale-term.app
+```
 
-| Keys | Action |
+Then:
+
+1. Press **Shift+Cmd+T** for a new session: type what to build, pick an
+   agent and press Enter. **Cmd+T** opens a plain terminal tab instead.
+2. When an agent runs, accept the offer to set up its status hooks (Claude
+   Code, Kiro) so ale-term knows exactly when it works, finishes or needs you.
+3. Press **Option+Cmd+B** to switch between the sidebar and the board, and
+   **Shift+Cmd+P** to find any command by name.
+
+To keep the app, drag `target/release/ale-term.app` into Applications. It is
+signed for this Mac only; to give it to someone else, have them build it or
+sign it with a Developer ID.
+
+## Commands and shortcuts
+
+Every command is in the command palette (**Shift+Cmd+P**): type a few letters
+of its name. In the shortcuts, ⌘ is Command, ⇧ Shift, ⌥ Option and ⌃ Control.
+
+<!-- commands:start -->
+
+| Command | Shortcut |
 |---|---|
-| Shift+Cmd+P | Command palette |
-| Cmd+B | Show or hide the sidebar (or, in the board layout, the docked board) |
-| Option+Cmd+B | Switch between the sidebar and board layouts |
-| Shift+Cmd+B | Show or hide the agent board |
-| Option+Cmd+G | Show or hide the agent graph beside the focused agent |
-| Shift+Cmd+T | New session: a page to give an agent a task, or open a plain terminal |
-| Shift+Cmd+A | Go to the next agent that needs you |
-| Cmd+P | Switch workspace (also: click the workspace name) |
-| Ctrl+Cmd+Right / Left | Next / previous workspace |
-| Cmd+T / Cmd+W | New tab / close pane (closes the tab with its last pane) |
-| Shift+Cmd+W | Close tab |
-| Cmd+D / Shift+Cmd+D | Split right / down |
-| Option+Cmd+Arrows | Move focus between panes |
-| Cmd+] / Cmd+[ | Next / previous pane |
-| Cmd+1..9, Ctrl+Tab, Shift+Cmd+] / [ | Switch tabs |
-| Cmd+C / Cmd+V | Copy selection / paste |
-| Cmd+F | Find in scrollback (Enter: older match, Shift+Enter: newer) |
-| Cmd+G / Shift+Cmd+G | Find next / previous |
-| Cmd+Up / Cmd+Down | Jump to previous / next prompt |
-| Cmd+Home / Cmd+End | Scroll to top / bottom |
-| Shift+PageUp / PageDown | Scroll a page |
-| Cmd+K | Clear scrollback |
-| Cmd+= / Cmd+- / Cmd+0 | Font size |
-| Cmd+, | Settings |
-| Ctrl+Cmd+F | Full screen |
+| **Tabs and panes** | |
+| New Tab | `⌘T` |
+| Close Pane | `⌘W` |
+| Close Tab | `⇧⌘W` |
+| Rename Tab |  |
+| Split Right | `⌘D` |
+| Split Down | `⇧⌘D` |
+| Next Tab | `⌃Tab` |
+| Previous Tab | `⌃⇧Tab` |
+| Next Pane | `⌘]` |
+| Previous Pane | `⌘[` |
+| Focus Pane Left | `⌥⌘←` |
+| Focus Pane Right | `⌥⌘→` |
+| Focus Pane Above | `⌥⌘↑` |
+| Focus Pane Below | `⌥⌘↓` |
+| **Workspaces** | |
+| Switch Workspace | `⌘P` |
+| Next Workspace | `⌃⌘→` |
+| Previous Workspace | `⌃⌘←` |
+| New Workspace |  |
+| Rename Workspace |  |
+| Move Tab to Workspace |  |
+| Set Up Workspace Tabs from Template |  |
+| **Agents** | |
+| Toggle Sidebar or Docked Board | `⌘B` |
+| Switch Layout: Sidebar / Board | `⌥⌘B` |
+| Toggle Agent Board | `⇧⌘B` |
+| Toggle Agent Graph | `⌥⌘G` |
+| New Agent Session | `⇧⌘T` |
+| Resume Archived Session |  |
+| Clear Session Archive |  |
+| Go to Next Agent That Needs You | `⇧⌘A` |
+| Set Up Claude Code Status Hooks |  |
+| Remove Claude Code Status Hooks |  |
+| Set Up Kiro Status Hooks |  |
+| Remove Kiro Status Hooks |  |
+| **Text, search and scrolling** | |
+| Copy | `⌘C` |
+| Paste | `⌘V` |
+| Find in Scrollback | `⌘F` |
+| Find Next | `⌘G` |
+| Find Previous | `⇧⌘G` |
+| Jump to Previous Prompt | `⌘↑` |
+| Jump to Next Prompt | `⌘↓` |
+| Scroll Page Up | `⇧PgUp` |
+| Scroll Page Down | `⇧PgDn` |
+| Scroll to Top | `⌘Home` |
+| Scroll to Bottom | `⌘End` |
+| Clear Scrollback | `⌘K` |
+| **Window and app** | |
+| Increase Font Size | `⌘+` |
+| Decrease Font Size | `⌘-` |
+| Reset Font Size | `⌘0` |
+| Toggle Full Screen | `⌃⌘F` |
+| Command Palette | `⇧⌘P` |
+| Settings | `⌘,` |
+| Open Settings File |  |
+| Quit ale-term | `⌘Q` |
 
-Mouse: drag to select (double-click a word, triple-click a line), drag the
+<!-- commands:end -->
+
+Other keys:
+
+| Keys | Where | What they do |
+|---|---|---|
+| `⌘1` … `⌘9` | Anywhere | Go to that tab; `⌘9` goes to the last one |
+| `⇧⌘]` / `⇧⌘[` | Anywhere | Next / previous tab |
+| `Enter` / `⇧Enter` | Find bar (`⌘F`) | Older / newer match |
+| `Enter` | New session page | Start the agent on the task |
+| `⇧Enter` | New session page | New line |
+| `⌘Enter` | New session page | Open a plain terminal instead |
+| `Tab` | New session page | Choose the agent |
+| `@` | New session page | Refer to a file: `↑` `↓` choose, `Enter` or `Tab` insert, `Esc` close the list |
+| `Esc` | New session page | Close the page |
+| Arrows, `Enter` | Agent board (`⇧⌘B`) | Move between cards; go to the agent |
+| Arrows, `Enter` | Settings (`⌘,`) | Move and change values; edit text. `⌘E` opens the file |
+
+**Mouse.** Drag to select (double-click a word, triple-click a line), drag the
 line between panes to resize, click the × on a tab (or middle-click it) to
 close it. Rest the pointer on a tab whose title is cut short and the title
 slowly scrolls by, so all of it can be read. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
 address or file path to open it.
 
+## Command line
+
+```text
+ale-term [--cwd <dir>]               start, with the first tab in <dir>
+ale-term --version | --help
+ale-term hooks status                which agents' status hooks are installed
+ale-term hooks install claude|kiro   add an agent's status hooks
+ale-term hooks remove claude|kiro    take them out again
+```
+
+In the app bundle the program is
+`target/release/ale-term.app/Contents/MacOS/ale-term`; from source, use
+`cargo run -p ale-term -- <arguments>`. `ale-term hook <agent> [event]` is
+what the installed hooks call to report to the running app; it is not meant
+to be run by hand.
+
 ## Agents
+
+<table>
+<tr>
+<td><img src="assets/screenshots/sidebar.png" alt="The sidebar layout: agents grouped by project, each with its state and what it is doing"></td>
+<td><img src="assets/screenshots/newsession.png" alt="A new session: a task with an @ file reference, the agent picker and the folder"></td>
+</tr>
+<tr>
+<td align="center">The sidebar layout</td>
+<td align="center">A new session, referring to a file with <code>@</code></td>
+</tr>
+</table>
 
 The sidebar lists every agent and shell, grouped by project (or by status:
 the button next to the search box). Each agent shows its task, what it is
@@ -298,7 +416,29 @@ instead. That is faster for very large windows under heavy output, but on
 Apple GPUs the graphics driver holds about 90 MB of working memory while the
 screen is changing (about 150 MB in total).
 
-## Layout
+## Development
+
+```sh
+cargo run -p ale-term                 # run from source
+cargo test --workspace                # all tests
+cargo clippy --workspace --all-targets
+python3 scripts/readme-commands.py    # refresh the command table in this README
+python3 scripts/make-icon.py          # regenerate the app icon
+```
+
+A test fails when a command is added to the palette but not to the table
+above; running `scripts/readme-commands.py` brings the table up to date.
+
+**Snapshots.** `ale-term --snapshot out.bmp` draws the window into a BMP file
+and quits, for checking changes by eye. `--snapshot-delay <ms>` waits first,
+`--type <text>` types into the first pane, `--demo` adds a tab and two
+splits, and each `--do <step>` runs a palette command by name or a test step:
+`type:<text>`, `wait:<ms>`, `demo:tabs`, `demo:agents` (pretend agents in
+every pane), `start:agents`, `start:folder`, `hover-tab:<tab>:<seconds>` or
+`setting:<section.key>:+`. The screenshots in this README were made that way,
+from a sample project with pretend agents.
+
+**Code layout**
 
 | Crate | Role |
 |---|---|

@@ -215,14 +215,20 @@ impl App {
         self.relayout();
     }
 
-    /// Test hook for visual checks: opens a few more tabs and pretends an
-    /// agent runs in every pane, in a spread of states.
-    pub(super) fn demo_agents(&mut self) {
-        use ale_agents::{AgentKind, Session};
+    /// Test hook for visual checks: four more tabs, for `demo_agents`.
+    /// Run it a moment before, so their shells have started: a shell that
+    /// shows its first prompt ends a pretend session in its pane.
+    pub(super) fn demo_tabs(&mut self) {
         for _ in 0..4 {
             self.new_tab(None);
         }
         self.select_tab(0);
+    }
+
+    /// Test hook for visual checks: pretends an agent runs in every pane
+    /// (see `demo_tabs` for more panes), in a spread of states.
+    pub(super) fn demo_agents(&mut self) {
+        use ale_agents::{AgentKind, Session};
         let examples = [
             (AgentKind::Claude, AgentState::NeedsYou, "docs nav", Some("Allow edit to nav.tsx?")),
             (AgentKind::Claude, AgentState::Working, "pricing page", Some("Editing pricing.css")),
