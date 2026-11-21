@@ -135,7 +135,7 @@ impl App {
                 title: "Background task".to_owned(),
                 detail: task.label.clone(),
                 status: "Running".to_owned(),
-                color: state_color(AgentState::WaitingOnSubagents, palette),
+                color: state_color(AgentState::Waiting, palette),
                 elapsed: String::new(),
                 running: true,
             });

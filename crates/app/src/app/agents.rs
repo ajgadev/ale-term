@@ -37,7 +37,7 @@ const STATUS_ORDER: [AgentState; 7] = [
     AgentState::Error,
     AgentState::RateLimited,
     AgentState::Working,
-    AgentState::WaitingOnSubagents,
+    AgentState::Waiting,
     AgentState::Done,
     AgentState::Idle,
 ];
@@ -453,7 +453,7 @@ impl App {
     pub(super) fn agent_status(session: &Session) -> String {
         let label = session.state.label();
         match (session.state, &session.activity) {
-            (AgentState::Working | AgentState::NeedsYou | AgentState::WaitingOnSubagents, Some(activity)) => {
+            (AgentState::Working | AgentState::NeedsYou | AgentState::Waiting, Some(activity)) => {
                 activity.clone()
             }
             (AgentState::Error | AgentState::RateLimited, Some(activity)) => format!("{label}: {activity}"),
@@ -826,5 +826,5 @@ fn run_detached(program: &str, args: &[&str]) {
 
 /// An agent shows a spinner while it is busy.
 pub(super) fn spins(state: AgentState) -> bool {
-    matches!(state, AgentState::Working | AgentState::WaitingOnSubagents)
+    matches!(state, AgentState::Working | AgentState::Waiting)
 }

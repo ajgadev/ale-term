@@ -22,7 +22,7 @@ pub const TITLES: [&str; COLUMNS] = ["Needs you", "Working", "Done", "Idle"];
 pub fn column_of(state: AgentState) -> usize {
     match state {
         AgentState::NeedsYou | AgentState::Error | AgentState::RateLimited => 0,
-        AgentState::Working | AgentState::WaitingOnSubagents => 1,
+        AgentState::Working | AgentState::Waiting => 1,
         AgentState::Done => 2,
         AgentState::Idle => 3,
     }
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(panes(1), [2, 3]);
         assert!(panes(2).is_empty());
         assert_eq!(panes(3), [5]);
-        assert_eq!(column_of(AgentState::WaitingOnSubagents), 1);
+        assert_eq!(column_of(AgentState::Waiting), 1);
         assert_eq!(column_of(AgentState::RateLimited), 0);
     }
 

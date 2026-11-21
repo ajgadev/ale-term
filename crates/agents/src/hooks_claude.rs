@@ -92,20 +92,33 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
                 session.subagent_finished(&id, text(payload, &["last_assistant_message"]), now);
             }
             session.note_background_tasks(payload);
+            session.note_scheduled_wakeups(payload);
             // The main agent had stopped and was only waiting for these.
-            if session.state == AgentState::WaitingOnSubagents && session.running_subagents() == 0 {
-                return session.set_state(AgentState::Done, now);
+            if session.state == AgentState::Waiting {
+                match session.waiting_for() {
+                    Some(what) => session.set_activity(what),
+                    None => {
+                        session.activity = None;
+                        return session.set_state(AgentState::Done, now);
+                    }
+                }
             }
             Change::Updated
         }
         "Stop" => {
             session.note_background_tasks(payload);
-            if session.running_subagents() > 0 {
-                session.set_activity(format!("{} subagents still running", session.running_subagents()));
-                session.set_state(AgentState::WaitingOnSubagents, now)
-            } else {
-                session.activity = None;
-                session.set_state(AgentState::Done, now)
+            session.note_scheduled_wakeups(payload);
+            // Stopped is not always finished: the agent may be paused
+            // until subagents or other background work wake it again.
+            match session.waiting_for() {
+                Some(what) => {
+                    session.set_activity(what);
+                    session.set_state(AgentState::Waiting, now)
+                }
+                None => {
+                    session.activity = None;
+                    session.set_state(AgentState::Done, now)
+                }
             }
         }
         "StopFailure" => {
@@ -267,11 +280,51 @@ mod tests {
         apply(&mut s, "SubagentStop", &json!({ "agent_id": "a3", "last_assistant_message": "found it" }), now);
         assert_eq!(s.subagents[2].result.as_deref(), Some("found it"));
 
-        assert_eq!(apply(&mut s, "Stop", &json!({}), now), Change::State(AgentState::WaitingOnSubagents));
+        assert_eq!(apply(&mut s, "Stop", &json!({}), now), Change::State(AgentState::Waiting));
         apply(&mut s, "SubagentStop", &json!({ "agent_id": "a1" }), now);
-        assert_eq!(s.state, AgentState::WaitingOnSubagents);
+        assert_eq!(s.state, AgentState::Waiting);
         let later = now + Duration::from_secs(3);
         assert_eq!(apply(&mut s, "SubagentStop", &json!({ "agent_id": "a2" }), later), Change::State(AgentState::Done));
+    }
+
+    #[test]
+    fn a_stopped_agent_with_work_in_flight_is_waiting_not_done() {
+        let (mut s, now) = session();
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "ship it" }), now);
+        // A workflow is running in the background.
+        let workflow = json!({ "id": "w1", "type": "workflow", "status": "running", "description": "review changes" });
+        let stop = json!({ "background_tasks": [workflow], "session_crons": [] });
+        assert_eq!(apply(&mut s, "Stop", &stop, now), Change::State(AgentState::Waiting));
+        assert_eq!(s.activity.as_deref(), Some("Waiting on workflow: review changes"));
+        // It wakes, works, and stops with nothing left: now it is done.
+        let tool = json!({ "tool_name": "Read", "tool_input": { "file_path": "/a/b.rs" } });
+        assert_eq!(apply(&mut s, "PreToolUse", &tool, now), Change::State(AgentState::Working));
+        assert_eq!(apply(&mut s, "Stop", &json!({ "background_tasks": [] }), now), Change::State(AgentState::Done));
+
+        // A server left running is not something to wait for.
+        let server = json!({ "id": "s1", "type": "shell", "status": "running", "description": "dev server", "command": "npm run dev" });
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "start it" }), now);
+        assert_eq!(apply(&mut s, "Stop", &json!({ "background_tasks": [server.clone()] }), now), Change::State(AgentState::Done));
+
+        // Background subagents reported only in the list still count, and
+        // several kinds are summed up.
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "more" }), now);
+        let agent = json!({ "id": "a9", "type": "subagent", "status": "running", "description": "explore", "agent_type": "Explore" });
+        let monitor = json!({ "id": "m1", "type": "monitor", "status": "running", "description": "watch CI" });
+        let stop = json!({ "background_tasks": [agent, monitor, workflow_again(), server] });
+        assert_eq!(apply(&mut s, "Stop", &stop, now), Change::State(AgentState::Waiting));
+        assert_eq!(s.activity.as_deref(), Some("Waiting on 1 subagent and 2 background tasks"));
+
+        // A scheduled wake-up alone also means "not finished".
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "check hourly" }), now);
+        let cron = json!({ "id": "c1", "schedule": "0 * * * *", "recurring": true, "prompt": "check" });
+        let stop = json!({ "background_tasks": [], "session_crons": [cron] });
+        assert_eq!(apply(&mut s, "Stop", &stop, now), Change::State(AgentState::Waiting));
+        assert_eq!(s.activity.as_deref(), Some("Paused until its scheduled wake-up"));
+    }
+
+    fn workflow_again() -> serde_json::Value {
+        json!({ "id": "w2", "type": "workflow", "status": "running", "description": "second pass" })
     }
 
     #[test]

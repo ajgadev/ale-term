@@ -29,7 +29,7 @@ impl Filter {
             Filter::Waiting => {
                 matches!(state, AgentState::NeedsYou | AgentState::Done | AgentState::Error | AgentState::RateLimited)
             }
-            Filter::Working => matches!(state, AgentState::Working | AgentState::WaitingOnSubagents),
+            Filter::Working => matches!(state, AgentState::Working | AgentState::Waiting),
         }
     }
 }
@@ -43,7 +43,7 @@ pub fn state_color(state: AgentState, palette: &Palette) -> Rgb {
         AgentState::Idle => palette.chrome_text_dim,
         AgentState::Error => palette.ansi[1],
         AgentState::RateLimited => palette.ansi[3],
-        AgentState::WaitingOnSubagents => palette.ansi[5],
+        AgentState::Waiting => palette.ansi[5],
     }
 }
 
@@ -408,7 +408,7 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
 
                 r.image(*icon, rect.x + pad, first, size, size, [0.0, 0.0, 1.0, 1.0]);
                 // A busy agent's icon spins instead of carrying a dot.
-                if !matches!(state, AgentState::Working | AgentState::WaitingOnSubagents) {
+                if !matches!(state, AgentState::Working | AgentState::Waiting) {
                     let radius = (3.0 * scale).round();
                     let behind = if *current { palette.background } else { palette.chrome };
                     crate::draw::dot(r, rect.x + pad + size, first + radius, radius + line, color(behind));
@@ -586,7 +586,7 @@ mod tests {
         assert!(Filter::Waiting.matches(AgentState::NeedsYou));
         assert!(Filter::Waiting.matches(AgentState::Done));
         assert!(!Filter::Waiting.matches(AgentState::Working));
-        assert!(Filter::Working.matches(AgentState::WaitingOnSubagents));
+        assert!(Filter::Working.matches(AgentState::Waiting));
         assert!(!Filter::Working.matches(AgentState::Idle));
     }
 

@@ -105,7 +105,7 @@ pub enum AgentState {
     Error,
     RateLimited,
     /// The main agent stopped but its subagents are still running.
-    WaitingOnSubagents,
+    Waiting,
 }
 
 impl AgentState {
@@ -117,7 +117,7 @@ impl AgentState {
             AgentState::Idle => "Idle",
             AgentState::Error => "Error",
             AgentState::RateLimited => "Rate limited",
-            AgentState::WaitingOnSubagents => "Waiting on subagents",
+            AgentState::Waiting => "Waiting on tasks",
         }
     }
 
@@ -152,6 +152,18 @@ pub struct Subagent {
 pub struct BackgroundTask {
     pub id: String,
     pub label: String,
+    /// What it is, as the agent names it: "shell", "subagent", "workflow",
+    /// "monitor"... Empty when not reported.
+    pub kind: String,
+}
+
+impl BackgroundTask {
+    /// Whether the agent is paused until this finishes. A shell command
+    /// left running is as often a server that never ends as a job being
+    /// waited for, so it does not count.
+    pub fn awaited(&self) -> bool {
+        !matches!(self.kind.as_str(), "shell" | "bash" | "local_bash")
+    }
 }
 
 /// What happened to a session as the result of an update.
@@ -183,6 +195,8 @@ pub struct Session {
     pub cwd: Option<PathBuf>,
     pub subagents: Vec<Subagent>,
     pub background_tasks: Vec<BackgroundTask>,
+    /// Wake-ups the agent has scheduled for itself (a timer, a loop).
+    pub scheduled_wakeups: usize,
     /// Subagent launches that have been requested but not yet reported as
     /// started: who asked, and for what. The start report itself carries
     /// neither, so they are matched up in order.
@@ -229,6 +243,7 @@ impl Session {
             cwd: None,
             subagents: Vec::new(),
             background_tasks: Vec::new(),
+            scheduled_wakeups: 0,
             pending_launches: VecDeque::new(),
             hooked: false,
             last_output: None,
@@ -447,10 +462,44 @@ impl Session {
                 let label = text(task, &["description", "command", "name", "title", "summary"])
                     .or_else(|| task.as_str().map(str::to_owned))?;
                 let id = text(task, &["id", "task_id", "shell_id", "bash_id"]).unwrap_or_else(|| label.clone());
-                Some(BackgroundTask { id: clean(&id, 80), label: clean(&label, 120) })
+                let kind = text(task, &["type", "task_type"]).unwrap_or_default();
+                Some(BackgroundTask { id: clean(&id, 80), label: clean(&label, 120), kind: clean(&kind, 40) })
             })
             .take(32)
             .collect();
+    }
+
+    /// Notes the wake-ups the agent has scheduled, from a hook's report.
+    pub(crate) fn note_scheduled_wakeups(&mut self, payload: &Value) {
+        if let Some(crons) = payload.get("session_crons").and_then(Value::as_array) {
+            self.scheduled_wakeups = crons.len();
+        }
+    }
+
+    /// What a stopped agent is still waiting for, in words, or `None` when
+    /// it is simply finished: subagents, other background work that will
+    /// wake it, or a wake-up it scheduled.
+    pub fn waiting_for(&self) -> Option<String> {
+        let plural = |count: usize, what: &str| format!("{count} {what}{}", if count == 1 { "" } else { "s" });
+        let subagents = self.running_subagents();
+        // Subagents can also appear in the background list; count them once.
+        let tasks: Vec<&BackgroundTask> =
+            self.background_tasks.iter().filter(|task| task.awaited() && task.kind != "subagent").collect();
+        let listed_subagents = self.background_tasks.iter().filter(|task| task.kind == "subagent").count();
+        let subagents = subagents.max(listed_subagents);
+        let mut parts = Vec::new();
+        if subagents > 0 {
+            parts.push(plural(subagents, "subagent"));
+        }
+        match tasks.as_slice() {
+            [] => {}
+            [one] => parts.push(if one.kind.is_empty() { one.label.clone() } else { format!("{}: {}", one.kind, one.label) }),
+            many => parts.push(plural(many.len(), "background task")),
+        }
+        if parts.is_empty() {
+            return (self.scheduled_wakeups > 0).then(|| "Paused until its scheduled wake-up".to_owned());
+        }
+        Some(format!("Waiting on {}", parts.join(" and ")))
     }
 }
 

@@ -74,7 +74,7 @@ doing right now, and how long it has been in its current state:
 | Done | Finished its turn and you have not looked yet |
 | Idle | Waiting for a prompt |
 | Error / Rate limited | The turn ended with a failure or a usage limit |
-| Waiting on subagents | The main agent stopped; subagents are still running |
+| Waiting on tasks | The agent stopped but is not finished: subagents, a workflow or other background work will wake it, or it scheduled its own wake-up. A shell command left running (a dev server) does not count |
 
 Tabs and sidebar rows for an agent show a small mark for that agent with a
 dot in the state's color. (The marks are simple shapes in each agent's
