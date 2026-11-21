@@ -125,7 +125,7 @@ impl App {
             title: self.agent_title(pane, session),
             state: session.state,
             status: Self::agent_status(session),
-            elapsed: ago(session.since),
+            elapsed: super::agents::shown_elapsed(session, now),
             message: None,
             actions,
             hooked: session.hooked,

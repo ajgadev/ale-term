@@ -346,12 +346,19 @@ impl App {
             return None;
         }
         let now = Instant::now();
-        let youngest = self
+        // Only working agents show a time (see `shown_elapsed`); with none
+        // working there is nothing to keep current.
+        let Some(youngest) = self
             .panes
             .values()
             .filter_map(|pane| pane.agent.as_ref())
+            .filter(|session| spins(session.state))
             .map(|session| now.duration_since(session.since))
-            .min()?;
+            .min()
+        else {
+            self.elapsed_refresh = None;
+            return None;
+        };
         if self.elapsed_refresh.is_some_and(|at| now >= at) {
             self.elapsed_refresh = None;
             self.redraw();
@@ -523,7 +530,7 @@ impl App {
                     status,
                     // Grouped by status, the project is the useful extra.
                     agent: if self.sidebar.by_status { workspace_name.to_owned() } else { session.kind.name().to_owned() },
-                    elapsed: sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
+                    elapsed: shown_elapsed(session, now),
                     current,
                     icon: self.agent_icon(session),
                 }];
@@ -908,4 +915,15 @@ fn run_detached(program: &str, args: &[&str]) {
 /// An agent shows a spinner while it is busy.
 pub(super) fn spins(state: AgentState) -> bool {
     matches!(state, AgentState::Working | AgentState::Waiting)
+}
+
+/// How long an agent has been at work, for its row, card and summary. Only
+/// a busy agent shows it: how long one has been idle or done is not worth
+/// the space, nor keeping a clock running for.
+pub(super) fn shown_elapsed(session: &Session, now: Instant) -> String {
+    if spins(session.state) {
+        sidebar::format_elapsed(now.duration_since(session.since).as_secs())
+    } else {
+        String::new()
+    }
 }

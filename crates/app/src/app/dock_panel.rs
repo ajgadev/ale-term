@@ -76,7 +76,7 @@ impl App {
                     title: self.agent_title(pane, session),
                     project: project.to_owned(),
                     status: Self::agent_status(session),
-                    elapsed: crate::sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
+                    elapsed: super::agents::shown_elapsed(session, now),
                     // Spins while the agent is busy.
                     icon: self.agent_icon(session),
                     tab: tab.custom_title.clone(),

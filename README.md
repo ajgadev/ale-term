@@ -189,7 +189,7 @@ to be run by hand.
 
 The sidebar lists every agent and shell, grouped by project (or by status:
 the button next to the search box). Each agent shows its task, what it is
-doing right now, and how long it has been in its current state:
+doing right now, its state and, while it works, for how long:
 
 | State | Meaning |
 |---|---|
