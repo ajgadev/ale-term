@@ -148,6 +148,10 @@ impl App {
         let dock = self.dock_rect().map(|rect| (rect, self.dock_model(), self.dock_lights()));
         let board = matches!(self.overlay, Overlay::Board { .. }).then(|| (self.content_rect(), self.board_model()));
         let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
+        // A tab being renamed shows the name typed so far.
+        let renaming: Option<(usize, String, bool)> =
+            self.rename_view().map(|(index, text, selected)| (index, text.to_owned(), selected));
+        let rename_view = renaming.as_ref().map(|(index, text, selected)| (*index, text.as_str(), *selected));
         // A tab being dragged is drawn where the pointer holds it.
         let dragged_tab = match self.mouse.drag {
             Drag::Tab { id, grab, moved: true, .. } => visible
@@ -251,6 +255,7 @@ impl App {
             dragged: dragged_tab,
             layout: self.config.agents.layout,
             hover_seconds: self.mouse.hover_tab_since.elapsed().as_secs_f32(),
+            editing: rename_view,
         };
         self.tab_scrolling = tab_bar.draw(renderer, &view, scale, palette);
         if let Some((rect, model)) = &graph {

@@ -83,6 +83,16 @@ impl App {
             return;
         }
 
+        // A click anywhere but the tab being renamed ends the rename,
+        // keeping the new name, and then does what it always does.
+        if let Some((index, ..)) = self.rename_view() {
+            let on_it = self.tab_bar().hit(x, y) == Some(TabBarHit::Tab(index));
+            if on_it {
+                return;
+            }
+            self.finish_rename(true);
+        }
+
         // A dropdown menu takes every click: on a row picks it, elsewhere
         // closes the menu.
         if matches!(self.overlay, Overlay::Menu(_)) {
@@ -199,6 +209,14 @@ impl App {
         if let Some(hit) = self.tab_bar().hit(x, y) {
             match (hit, mouse_button) {
                 (TabBarHit::Tab(index), MouseButton::Left) => {
+                    // A double-click on the tab already in front renames
+                    // it in place.
+                    let was_active = self.visible_tabs().get(index) == Some(&self.active);
+                    let clicks = self.register_click();
+                    if was_active && clicks == 2 {
+                        self.start_rename(index);
+                        return;
+                    }
                     self.select_tab(index);
                     // Holding the button and moving reorders the tab.
                     let grab = self.tab_bar().tabs.get(index).map_or(0.0, |rect| x - rect.x);

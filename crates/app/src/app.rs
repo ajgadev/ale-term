@@ -14,6 +14,7 @@ mod menus;
 mod mouse;
 mod overlays;
 mod start_page;
+mod tab_rename;
 mod workspaces;
 
 use std::collections::HashMap;
@@ -251,6 +252,8 @@ pub struct App {
     first_frame_logged: bool,
     /// The last frame showed a hovered tab's title scrolling.
     tab_scrolling: bool,
+    /// A tab whose title is being edited in place.
+    renaming: Option<tab_rename::Renaming>,
     /// The agents installed on this Mac, once known; the start page offers
     /// only these.
     installed_agents: Option<Vec<ale_agents::available::Installed>>,
@@ -327,6 +330,7 @@ impl App {
             launched: Instant::now(),
             first_frame_logged: false,
             tab_scrolling: false,
+            renaming: None,
             installed_agents: None,
             agents_checked: None,
         }
@@ -856,6 +860,9 @@ impl App {
         }
         let action =
             actions::from_key(&event.key_without_modifiers(), event.physical_key, self.modifiers);
+        if self.rename_key(event, action) {
+            return;
+        }
         if self.overlay.is_open() {
             return self.overlay_key(event, action, event_loop);
         }
@@ -1117,7 +1124,8 @@ impl ApplicationHandler<UserEvent> for App {
             // Text composed by the system: accents typed with dead keys,
             // emoji picker, input methods.
             WindowEvent::Ime(Ime::Commit(text)) => {
-                if self.overlay.is_open() {
+                if self.rename_type(&text) {
+                } else if self.overlay.is_open() {
                     self.overlay_type(&text);
                 } else if !self.start_type(&text) {
                     self.send_input(text.into_bytes());
@@ -1209,7 +1217,8 @@ impl ApplicationHandler<UserEvent> for App {
                     break;
                 }
                 if let Some(text) = step.strip_prefix("type:") {
-                    if self.overlay.is_open() {
+                    if self.rename_type(text) {
+                    } else if self.overlay.is_open() {
                         self.overlay_type(text);
                     } else {
                         self.start_type(text);
@@ -1249,6 +1258,9 @@ impl ApplicationHandler<UserEvent> for App {
                     let seconds = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0.0);
                     self.mouse.hover_tab = Some(TabBarHit::Tab(index));
                     self.mouse.hover_tab_since = Instant::now() - Duration::from_secs_f32(seconds);
+                } else if let Some(index) = step.strip_prefix("rename:") {
+                    // "rename:0": as if the first tab were double-clicked.
+                    self.start_rename(index.parse().unwrap_or(0));
                 } else if step == "demo:tabs" {
                     self.demo_tabs();
                 } else if step == "demo:agents" {

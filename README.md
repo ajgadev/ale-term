@@ -147,7 +147,9 @@ Other keys:
 
 **Mouse.** Drag to select (double-click a word, triple-click a line), drag the
 line between panes to resize, click the × on a tab (or middle-click it) to
-close it. Rest the pointer on a tab whose title is cut short and the title
+close it. Double-click the tab in front to rename it in place: type the new
+name and press Enter (Esc keeps the old one; an empty name brings back the
+automatic title). Rest the pointer on a tab whose title is cut short and the title
 slowly scrolls by, so all of it can be read. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
 address or file path to open it.
@@ -434,8 +436,8 @@ and quits, for checking changes by eye. `--snapshot-delay <ms>` waits first,
 `--type <text>` types into the first pane, `--demo` adds a tab and two
 splits, and each `--do <step>` runs a palette command by name or a test step:
 `type:<text>`, `wait:<ms>`, `demo:tabs`, `demo:agents` (pretend agents in
-every pane), `start:agents`, `start:folder`, `hover-tab:<tab>:<seconds>` or
-`setting:<section.key>:+`. The screenshots in this README were made that way,
+every pane), `start:agents`, `start:folder`, `hover-tab:<tab>:<seconds>`,
+`rename:<tab>` or `setting:<section.key>:+`. The screenshots in this README were made that way,
 from a sample project with pretend agents.
 
 **Code layout**

@@ -62,6 +62,9 @@ pub struct TabBarView<'a> {
     /// Seconds the pointer has been over the hovered tab: a title too long
     /// for its tab scrolls by, so all of it can be read.
     pub hover_seconds: f32,
+    /// A tab whose title is being edited: its position, the text so far,
+    /// and whether that text is selected (typing then replaces it).
+    pub editing: Option<(usize, &'a str, bool)>,
 }
 
 /// What a tab shows.
@@ -187,7 +190,7 @@ impl TabBar {
     /// Draws the bar. Returns whether a hovered title is scrolling, and so
     /// needs drawing again shortly.
     pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) -> bool {
-        let TabBarView { workspace, titles, active, hovered, dragged, layout, hover_seconds } = *view;
+        let TabBarView { workspace, titles, active, hovered, dragged, layout, hover_seconds, editing } = *view;
         // The dragged tab leaves its slot and follows the pointer, kept
         // within the row of tabs; nothing reacts to the pointer meanwhile.
         let dragged = dragged.filter(|(index, _)| *index < self.tabs.len());
@@ -276,6 +279,35 @@ impl TabBar {
                 }
                 (None, None) => {}
             }
+            if let Some((_, text, selected)) = editing.filter(|(at, ..)| *at == index) {
+                // The title is a text field: framed in the accent color,
+                // with a caret after the text, which keeps its end in view.
+                let line = scale.round().max(1.0);
+                let inset = (4.0 * scale).round();
+                let field_right = tab.x + tab.w - (padding / 2.0).round();
+                let field = Rect::new(x - inset, tab.y + inset * 1.5, field_right - x + inset, tab.h - inset * 3.0);
+                r.rect(field.x, field.y, field.w, field.h, color(palette.background));
+                for (fx, fy, fw, fh) in [
+                    (field.x, field.y, field.w, line),
+                    (field.x, field.y + field.h - line, field.w, line),
+                    (field.x, field.y, line, field.h),
+                    (field.x + field.w - line, field.y, line, field.h),
+                ] {
+                    r.rect(fx, fy, fw, fh, color(palette.accent));
+                }
+                let room = (field_right - x - inset).max(0.0);
+                let width = r.text_width(text);
+                let caret = (line * 2.0).max(2.0);
+                let offset = (width + caret - room).max(0.0);
+                r.set_clip(Some([x, field.y, room, field.h]));
+                if selected {
+                    r.rect(x - offset, text_y, width, metrics.height, color(palette.selection));
+                }
+                r.text(text, true, x - offset, text_y, width, color(palette.foreground));
+                r.rect(x - offset + width, text_y, caret, metrics.height, color(palette.accent));
+                r.set_clip(None);
+                continue;
+            }
             let full_width = r.text_width(&title.text);
             let used = if hovered_tab == Some(index) && full_width > max_width && max_width > metrics.width * 2.0 {
                 // Too long, and the pointer is on it: slide it along,
@@ -305,7 +337,8 @@ impl TabBar {
         // Close buttons: on the active tab, and on the one under the mouse.
         for (index, close) in closes.iter().enumerate() {
             let over_tab = matches!(hovered, Some(TabBarHit::Tab(i) | TabBarHit::Close(i)) if i == index);
-            if close.w <= 0.0 || !(index == active || over_tab) {
+            let being_renamed = editing.is_some_and(|(at, ..)| at == index);
+            if close.w <= 0.0 || being_renamed || !(index == active || over_tab) {
                 continue;
             }
             let over_button = hovered == Some(TabBarHit::Close(index));
