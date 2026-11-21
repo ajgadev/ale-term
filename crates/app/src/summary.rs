@@ -19,6 +19,8 @@ pub struct Summary {
     pub icon: u64,
     /// The agent's name, e.g. "Claude Code".
     pub agent: String,
+    /// The name the user gave its tab, if any.
+    pub tab: Option<String>,
     /// Its task.
     pub title: String,
     pub state: AgentState,
@@ -173,7 +175,8 @@ pub fn draw(r: &mut Renderer, summary: &Summary, pointer: (f32, f32), window: (f
                 let elapsed_width = r.text_width(&summary.elapsed);
                 let name_x = left + size + (cell.0 * 0.75).round();
                 let name_room = left + width - elapsed_width - cell.0 - name_x;
-                r.text(&fit(&summary.agent, name_room, cell.0), false, name_x, text_y, name_room.max(0.0), dim);
+                let (agent, tab) = (&summary.agent, summary.tab.as_deref());
+                crate::board::draw_agent_name(r, agent, tab, (name_x, text_y), name_room, cell.0, dim, fg);
                 r.text(&summary.elapsed, false, left + width - elapsed_width, text_y, elapsed_width, dim);
             }
             Line::Title => {
@@ -218,6 +221,7 @@ mod tests {
         Summary {
             icon: 0,
             agent: "Claude Code".into(),
+            tab: Some("Sheesh".into()),
             title: "pricing page".into(),
             state: AgentState::Done,
             status: "Done".into(),

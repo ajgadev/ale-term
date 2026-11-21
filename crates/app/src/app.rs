@@ -1281,7 +1281,11 @@ impl ApplicationHandler<UserEvent> for App {
                 } else if step == "down" {
                     self.overlay_move(1);
                 } else if step == "enter" {
-                    self.overlay_confirm(false, event_loop);
+                    if self.renaming.is_some() {
+                        self.finish_rename(true);
+                    } else {
+                        self.overlay_confirm(false, event_loop);
+                    }
                 } else if let Some(change) = step.strip_prefix("setting:") {
                     // "setting:font.size:+" steps a setting as the arrow
                     // keys in the settings screen would.

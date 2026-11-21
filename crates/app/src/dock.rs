@@ -290,7 +290,7 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, lights: boo
         let name_x = inner_x + size + (cell.0 * 0.75).round();
         let elapsed_width = r.text_width(&card.elapsed);
         let name_room = inner_x + inner_width - elapsed_width - cell.0 - name_x;
-        r.text(&fit(&card.agent, name_room, cell.0), false, name_x, first, name_room.max(0.0), dim);
+        crate::board::draw_agent_name(r, &card.agent, card.tab.as_deref(), (name_x, first), name_room, cell.0, dim, fg);
         r.text(&card.elapsed, false, inner_x + inner_width - elapsed_width, first, elapsed_width, dim);
         r.text(&fit(&card.title, inner_width, cell.0), true, inner_x, second, inner_width, fg);
 
@@ -336,6 +336,7 @@ mod tests {
             status: "Editing".into(),
             elapsed: "3m".into(),
             icon: 0,
+            tab: None,
         }
     }
 

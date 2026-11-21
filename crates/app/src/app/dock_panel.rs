@@ -79,6 +79,7 @@ impl App {
                     elapsed: crate::sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
                     // Spins while the agent is busy.
                     icon: self.agent_icon(session),
+                    tab: tab.custom_title.clone(),
                 });
             }
         }

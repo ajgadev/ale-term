@@ -41,6 +41,35 @@ pub struct Card {
     pub elapsed: String,
     /// Image key of the agent's icon (see `icons`).
     pub icon: u64,
+    /// The name the user gave the agent's tab, if any.
+    pub tab: Option<String>,
+}
+
+/// Draws an agent's name followed by the name the user gave its tab, if
+/// any: "Claude Code · Sheesh", the agent dimmed and the tab's name bright.
+/// When room is short the tab's name is shortened first. Returns the width
+/// drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_agent_name(
+    r: &mut Renderer,
+    agent: &str,
+    tab: Option<&str>,
+    (x, y): (f32, f32),
+    room: f32,
+    cell_width: f32,
+    dim: ale_render::Color,
+    bright: ale_render::Color,
+) -> f32 {
+    let room = room.max(0.0);
+    let used = r.text(&fit(agent, room, cell_width), false, x, y, room, dim);
+    let Some(tab) = tab.filter(|tab| !tab.is_empty()) else { return used };
+    let separator = " · ";
+    let tab_room = room - used - r.text_width(separator);
+    if tab_room < cell_width * 4.0 {
+        return used;
+    }
+    let after = used + r.text(separator, false, x + used, y, room - used, dim);
+    after + r.text(&fit(tab, tab_room, cell_width), true, x + after, y, tab_room, bright)
 }
 
 #[derive(Default)]
@@ -182,7 +211,8 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, palette: &P
         let third = second + metrics.height + gap * 1.5;
 
         let elapsed_width = r.text_width(&card.elapsed);
-        r.text(&fit(&card.agent, inner_width - elapsed_width - cell.0, cell.0), false, inner_x, first, inner_width, dim);
+        let name_room = inner_width - elapsed_width - cell.0;
+        draw_agent_name(r, &card.agent, card.tab.as_deref(), (inner_x, first), name_room, cell.0, dim, fg);
         r.text(&card.elapsed, false, inner_x + inner_width - elapsed_width, first, elapsed_width, dim);
         r.text(&fit(&card.title, inner_width, cell.0), true, inner_x, second, inner_width, fg);
         let detail = format!("{} · {}", card.project, card.status);
@@ -216,6 +246,7 @@ mod tests {
             status: "Editing".into(),
             elapsed: "3m".into(),
             icon: 0,
+            tab: None,
         }
     }
 

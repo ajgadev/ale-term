@@ -121,6 +121,7 @@ impl App {
         let mut summary = Summary {
             icon: crate::icons::key(session.kind),
             agent: session.kind.name().to_owned(),
+            tab: self.tabs.iter().find(|tab| tab.root.panes().contains(&pane_id)).and_then(|tab| tab.custom_title.clone()),
             title: self.agent_title(pane, session),
             state: session.state,
             status: Self::agent_status(session),

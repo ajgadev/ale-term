@@ -284,7 +284,8 @@ number of rows (the − and + in its header, or "Board rows" in the
 settings); scroll over a column to see the rest of its cards. Its height
 stays the same as agents come and go, so the terminals below are not
 resized. The agent in the focused pane is outlined; click a card to go to
-it.
+it. A tab you have named (double-click it) shows its name beside the
+agent's, here and in the summary card: "Claude Code · api server".
 
 **Graph** (Option+Cmd+G, or click an agent in the sidebar that has
 subagents): a panel beside the agent's terminal showing the agent, the
