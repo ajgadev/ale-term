@@ -153,7 +153,12 @@ Other keys:
 | Arrows, `Enter` | Agent board (`⇧⌘B`) | Move between cards; go to the agent |
 | Arrows, `Enter` | Settings (`⌘,`) | Move and change values; edit text. `⌘E` opens the file |
 
-**Mouse.** Drag to select (double-click a word, triple-click a line), drag the
+**Mouse.** Right-click a pane (or Ctrl+click it) for a menu to split it
+right or down, copy, paste, clear the scrollback, rename the tab or close
+the pane; the split button in the tab bar (a window divided in two, left of
+the ⌘ button) offers the same two splits. In a program that takes the mouse
+itself, such as Claude Code's full-screen mode, the right-click goes to the
+program; hold Shift to get the menu instead. Drag to select (double-click a word, triple-click a line), drag the
 line between panes to resize, click the × on a tab (or middle-click it) to
 close it. Double-click the tab in front to rename it in place: type the new
 name and press Enter (Esc keeps the old one; an empty name brings back the
@@ -473,7 +478,8 @@ and quits, for checking changes by eye. `--snapshot-delay <ms>` waits first,
 splits, and each `--do <step>` runs a palette command by name or a test step:
 `type:<text>`, `wait:<ms>`, `demo:tabs`, `demo:agents` (pretend agents in
 every pane), `start:agents`, `start:folder`, `hover-tab:<tab>:<seconds>`,
-`rename:<tab>`, `summary:<tab>` or `setting:<section.key>:+`. The screenshots in this README were made that way,
+`rename:<tab>`, `summary:<tab>`, `menu:split`, `menu:pane` or
+`setting:<section.key>:+`. The screenshots in this README were made that way,
 from a sample project with pretend agents.
 
 **Code layout**

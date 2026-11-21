@@ -99,7 +99,7 @@ impl App {
         // A dropdown menu takes every click: on a row picks it, elsewhere
         // closes the menu.
         if matches!(self.overlay, Overlay::Menu(_)) {
-            self.menu_click(x, y, mouse_button);
+            self.menu_click(x, y, mouse_button, event_loop);
             return;
         }
 
@@ -236,6 +236,7 @@ impl App {
                 (TabBarHit::NewTab, MouseButton::Left) => self.new_tab(None),
                 (TabBarHit::Layout(layout), MouseButton::Left) => self.set_layout(layout),
                 (TabBarHit::Commands, MouseButton::Left) => self.perform(Action::CommandPalette, event_loop),
+                (TabBarHit::Split, MouseButton::Left) => self.open_split_menu(),
                 (TabBarHit::Empty, MouseButton::Left) => {
                     let clicks = self.register_click();
                     if let Some(window) = &self.window {
@@ -277,6 +278,14 @@ impl App {
             if mouse_button == MouseButton::Left {
                 self.mouse.drag = Drag::Reported(pane);
             }
+            return;
+        }
+        // A right-click (or Ctrl+click, as elsewhere on macOS) opens the
+        // pane's menu, for the pane just focused.
+        let context_click = mouse_button == MouseButton::Right
+            || (mouse_button == MouseButton::Left && self.modifiers.control_key());
+        if context_click {
+            self.open_pane_menu(x, y);
             return;
         }
         if mouse_button != MouseButton::Left {
@@ -400,7 +409,12 @@ impl App {
         } else {
             self.tab_bar()
                 .hit(x, y)
-                .filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_) | TabBarHit::Commands))
+                .filter(|hit| {
+                    matches!(
+                        hit,
+                        TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_) | TabBarHit::Commands | TabBarHit::Split
+                    )
+                })
         };
         if hover_tab != self.mouse.hover_tab {
             // Moving between a tab and its close button is the same tab.

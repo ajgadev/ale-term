@@ -16,6 +16,33 @@ impl App {
         self.redraw();
     }
 
+    /// Opens the split button's menu under it.
+    pub(super) fn open_split_menu(&mut self) {
+        let anchor = self.tab_bar().split;
+        let rows = [(Action::SplitRight, None), (Action::SplitDown, None)];
+        self.overlay = Overlay::Menu(Box::new(Menu::commands(anchor, &rows)));
+        self.redraw();
+    }
+
+    /// Opens a pane's right-click menu at the pointer: splitting, the
+    /// clipboard, and the pane and its tab.
+    pub(super) fn open_pane_menu(&mut self, x: f32, y: f32) {
+        let has_selection = self.focused_pane().is_some_and(|pane| pane.terminal.lock().selection.is_some());
+        let mut rows = vec![(Action::SplitRight, None), (Action::SplitDown, None)];
+        if has_selection {
+            rows.push((Action::Copy, None));
+        }
+        rows.extend([
+            (Action::Paste, None),
+            (Action::ClearHistory, None),
+            (Action::RenameTab, Some("Rename Tab…")),
+            (Action::ClosePane, None),
+        ]);
+        let anchor = Rect::new(x, y, 0.0, 0.0);
+        self.overlay = Overlay::Menu(Box::new(Menu::commands(anchor, &rows)));
+        self.redraw();
+    }
+
     pub(super) fn menu_layout(&self) -> Option<MenuLayout> {
         let Overlay::Menu(menu) = &self.overlay else { return None };
         let metrics = self.renderer.as_ref()?.metrics();
@@ -23,7 +50,7 @@ impl App {
     }
 
     /// Closes the open menu and does what row `index` says.
-    pub(super) fn menu_choose(&mut self, index: usize) {
+    pub(super) fn menu_choose(&mut self, index: usize, event_loop: &ActiveEventLoop) {
         let Overlay::Menu(menu) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
         match menu.kind {
             MenuKind::NewSession if index == menu::NEW_SESSION_AGENT => self.new_agent_session(),
@@ -43,6 +70,11 @@ impl App {
                 Some(None) => self.choose_folder(),
                 None => {}
             },
+            MenuKind::Commands => {
+                if let Some(action) = menu.items.get(index).and_then(|item| item.action) {
+                    self.perform(action, event_loop);
+                }
+            }
         }
         self.redraw();
     }
@@ -50,9 +82,9 @@ impl App {
     /// A click while a menu is open: on a row picks it; anywhere else
     /// closes the menu, and the click does nothing more (as with the
     /// system's menus).
-    pub(super) fn menu_click(&mut self, x: f32, y: f32, button: MouseButton) {
+    pub(super) fn menu_click(&mut self, x: f32, y: f32, button: MouseButton, event_loop: &ActiveEventLoop) {
         match self.menu_layout().and_then(|layout| layout.row_at(x, y)) {
-            Some(index) if button == MouseButton::Left => self.menu_choose(index),
+            Some(index) if button == MouseButton::Left => self.menu_choose(index, event_loop),
             Some(_) => {}
             None => self.close_overlay(),
         }

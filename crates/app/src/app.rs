@@ -1256,6 +1256,15 @@ impl ApplicationHandler<UserEvent> for App {
                     self.start_launch(false);
                 } else if step == "start:agents" {
                     self.open_agent_menu();
+                } else if step == "menu:split" {
+                    self.open_split_menu();
+                } else if step == "menu:pane" {
+                    // As if the focused pane were right-clicked a third of
+                    // the way into it.
+                    let rect = self.focused_pane_id().and_then(|id| self.active_layout().rect_of(id));
+                    if let Some(rect) = rect {
+                        self.open_pane_menu(rect.x + rect.w / 3.0, rect.y + rect.h / 3.0);
+                    }
                 } else if step == "start:folder" {
                     self.open_folder_menu();
                 } else if let Some(hover) = step.strip_prefix("hover-tab:") {

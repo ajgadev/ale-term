@@ -40,6 +40,8 @@ pub struct TabBar {
     pub switch: [Rect; 2],
     /// The button that opens the command menu, left of the switch.
     pub commands: Rect,
+    /// The button that opens the split menu, left of the command menu's.
+    pub split: Rect,
 }
 
 /// The layout each half of the switch stands for.
@@ -89,6 +91,8 @@ pub enum TabBarHit {
     Layout(AgentLayout),
     /// The button that opens the command menu.
     Commands,
+    /// The button that opens the split menu.
+    Split,
     /// Empty space, used for dragging the window.
     Empty,
 }
@@ -123,7 +127,8 @@ impl TabBar {
         let switch_x = window_width - inset - segment * 2.0;
         let switch = [0.0, 1.0].map(|i| Rect::new(switch_x + i * segment, top + inset, segment, height - inset * 2.0));
         let commands = Rect::new(switch_x - inset - segment, top + inset, segment, height - inset * 2.0);
-        let available = (commands.x - inset - left - button).max(0.0);
+        let split = Rect::new(commands.x - inset - segment, top + inset, segment, height - inset * 2.0);
+        let available = (split.x - inset - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
 
         let tabs: Vec<Rect> = (0..tab_count)
@@ -150,6 +155,7 @@ impl TabBar {
             new_tab: Rect::new(left + tab_count as f32 * width, top, button, height),
             switch,
             commands,
+            split,
         }
     }
 
@@ -166,6 +172,9 @@ impl TabBar {
         }
         if self.commands.contains(x, y) {
             return Some(TabBarHit::Commands);
+        }
+        if self.split.contains(x, y) {
+            return Some(TabBarHit::Split);
         }
         if let Some(index) = self.close.iter().position(|close| close.contains(x, y)) {
             return Some(TabBarHit::Close(index));
@@ -366,7 +375,24 @@ impl TabBar {
         let glyph_y = commands.y + ((commands.h - metrics.height) / 2.0).round();
         let ink = if over { palette.foreground } else { palette.chrome_text_dim };
         r.text("⌘", false, glyph_x, glyph_y, commands.w, color(ink));
+        self.draw_split_button(r, hovered == Some(TabBarHit::Split), scale, palette);
         scrolling
+    }
+
+    /// The split button: a small window divided down the middle, framed
+    /// like the command menu's button.
+    fn draw_split_button(&self, r: &mut Renderer, over: bool, scale: f32, palette: &Palette) {
+        let line = scale.round().max(1.0);
+        let button = self.split;
+        outline(r, button, line, color(palette.border));
+        if over {
+            r.rect(button.x + line, button.y + line, button.w - line * 2.0, button.h - line * 2.0, color(palette.border));
+        }
+        let ink = color(if over { palette.foreground } else { palette.chrome_text_dim });
+        let (w, h) = ((14.0 * scale).round(), (11.0 * scale).round());
+        let icon = Rect::new(button.x + ((button.w - w) / 2.0).round(), button.y + ((button.h - h) / 2.0).round(), w, h);
+        outline(r, icon, line, ink);
+        r.rect(icon.x + ((w - line) / 2.0).round(), icon.y, line, h, ink);
     }
 
     /// The layout switch: a small picture of each layout, the one in use
@@ -496,17 +522,20 @@ mod tests {
         let bar = TabBar::layout(3, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         let [sidebar, board] = bar.switch;
         assert!(board.x + board.w <= 1000.0 && sidebar.x + sidebar.w <= board.x + 0.5);
-        assert!(bar.new_tab.x + bar.new_tab.w <= bar.commands.x);
-        // The command menu's button is just left of the switch.
+        assert!(bar.new_tab.x + bar.new_tab.w <= bar.split.x);
+        // The command menu's button is just left of the switch, and the
+        // split button left of that.
         assert!(bar.commands.x + bar.commands.w <= sidebar.x);
+        assert!(bar.split.x + bar.split.w <= bar.commands.x);
         assert_eq!(bar.hit(bar.commands.x + 3.0, 19.0), Some(TabBarHit::Commands));
+        assert_eq!(bar.hit(bar.split.x + 3.0, 19.0), Some(TabBarHit::Split));
         assert_eq!(bar.hit(sidebar.x + 3.0, 19.0), Some(TabBarHit::Layout(AgentLayout::Sidebar)));
         assert_eq!(bar.hit(board.x + 3.0, 19.0), Some(TabBarHit::Layout(AgentLayout::Board)));
         // Many tabs never run into it.
         let crowded = TabBar::layout(40, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         let last = crowded.tabs[39];
-        assert!(crowded.new_tab.x + crowded.new_tab.w <= crowded.switch[0].x);
-        assert!(last.x + last.w <= crowded.switch[0].x);
+        assert!(crowded.new_tab.x + crowded.new_tab.w <= crowded.split.x);
+        assert!(last.x + last.w <= crowded.split.x);
     }
 
     #[test]

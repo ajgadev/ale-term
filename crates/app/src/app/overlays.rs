@@ -138,7 +138,7 @@ impl App {
             }
             Overlay::Menu(menu) => {
                 let index = menu.selected;
-                self.menu_choose(index);
+                self.menu_choose(index, event_loop);
             }
             Overlay::Settings { .. } | Overlay::None => {}
         }

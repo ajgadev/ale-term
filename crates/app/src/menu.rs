@@ -21,6 +21,9 @@ pub enum MenuKind {
     Agent,
     /// Which folder the start page's session runs in.
     Folder,
+    /// Commands to run, such as the split button's menu or a pane's
+    /// right-click menu.
+    Commands,
 }
 
 /// One row of a menu.
@@ -37,6 +40,8 @@ pub struct MenuItem {
     /// The folder this row picks, in the folder menu. `None` on the row
     /// that asks for one.
     pub folder: Option<std::path::PathBuf>,
+    /// The command this row runs, in a menu of commands.
+    pub action: Option<crate::actions::Action>,
 }
 
 pub struct Menu {
@@ -62,6 +67,7 @@ impl Menu {
             checked: false,
             agent: None,
             folder: None,
+            action: None,
         };
         Menu {
             kind: MenuKind::NewSession,
@@ -83,6 +89,7 @@ impl Menu {
                 checked: *kind == current,
                 agent: Some(*kind),
                 folder: None,
+                action: None,
             })
             .collect();
         let selected = choices.iter().position(|(kind, _)| *kind == current).unwrap_or(0);
@@ -101,6 +108,7 @@ impl Menu {
                 checked: path == current,
                 agent: None,
                 folder: Some(path.clone()),
+                action: None,
             })
             .collect();
         items.push(MenuItem {
@@ -110,9 +118,34 @@ impl Menu {
             checked: false,
             agent: None,
             folder: None,
+            action: None,
         });
         let selected = items.iter().position(|item| item.checked).unwrap_or(0);
         Menu { kind: MenuKind::Folder, anchor, items, selected }
+    }
+
+    /// A menu of commands, each shown with its name from the command
+    /// palette (or `label`, when given) and its shortcut.
+    pub fn commands(anchor: Rect, rows: &[(crate::actions::Action, Option<&str>)]) -> Menu {
+        let items = rows
+            .iter()
+            .map(|(action, label)| {
+                let (name, keys) = crate::actions::COMMANDS
+                    .iter()
+                    .find(|(known, ..)| known == action)
+                    .map_or(("", ""), |(_, name, keys)| (*name, *keys));
+                MenuItem {
+                    label: label.unwrap_or(name).to_owned(),
+                    detail: keys.to_owned(),
+                    icon: None,
+                    checked: false,
+                    agent: None,
+                    folder: None,
+                    action: Some(*action),
+                }
+            })
+            .collect();
+        Menu { kind: MenuKind::Commands, anchor, items, selected: 0 }
     }
 
     pub fn step(&mut self, offset: isize) {
@@ -257,6 +290,16 @@ mod tests {
         assert_eq!(menu.selected, 1);
         // An agent that is not listed is not selected.
         assert_eq!(Menu::agents(Rect::default(), AgentKind::Codex, &installed).selected, 0);
+    }
+
+    #[test]
+    fn command_menus_show_each_commands_name_and_shortcut() {
+        use crate::actions::Action;
+        let menu = Menu::commands(Rect::default(), &[(Action::SplitRight, None), (Action::RenameTab, Some("Rename…"))]);
+        assert_eq!(menu.kind, MenuKind::Commands);
+        assert_eq!((menu.items[0].label.as_str(), menu.items[0].detail.as_str()), ("Split Right", "⌘D"));
+        assert_eq!((menu.items[1].label.as_str(), menu.items[1].detail.as_str()), ("Rename…", ""));
+        assert_eq!(menu.items[1].action, Some(Action::RenameTab));
     }
 
     #[test]
