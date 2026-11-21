@@ -141,14 +141,30 @@ pub struct PaletteLayout {
     pub first: usize,
 }
 
+/// The first row to show of `count`, given the highlighted one and the
+/// first shown until now: the list scrolls only as far as needed to keep
+/// the highlight in view, so pointing at a row never makes it jump.
+pub fn palette_scroll(count: usize, selected: usize, previous: usize) -> usize {
+    let visible = count.min(PALETTE_ROWS);
+    let last_first = count.saturating_sub(visible);
+    let mut first = previous.min(last_first);
+    if selected < first {
+        first = selected;
+    } else if selected >= first + visible {
+        first = selected + 1 - visible;
+    }
+    first.min(last_first)
+}
+
 impl PaletteLayout {
-    pub fn new(window: (f32, f32), cell: (f32, f32), scale: f32, count: usize, selected: usize) -> Self {
+    /// `first` is the first row shown until now (see [`palette_scroll`]).
+    pub fn new(window: (f32, f32), cell: (f32, f32), scale: f32, count: usize, selected: usize, first: usize) -> Self {
         let row_height = (cell.1 + 12.0 * scale).round();
         let width = (560.0 * scale).min(window.0 - 32.0 * scale).max(cell.0 * 10.0).round();
         let x = ((window.0 - width) / 2.0).round();
         let y = (window.1 * 0.16).round();
         let visible = count.min(PALETTE_ROWS);
-        let first = selected.saturating_sub(PALETTE_ROWS - 1).min(count.saturating_sub(visible));
+        let first = palette_scroll(count, selected, first);
         let input = Rect::new(x, y, width, row_height);
         let rows = (0..visible)
             .map(|i| Rect::new(x, y + row_height * (i + 1) as f32, width, row_height))
@@ -180,13 +196,14 @@ pub fn draw_palette(
     placeholder: &str,
     query: &str,
     selected: usize,
+    first: usize,
     rows: &[(String, String)],
     window: (f32, f32),
     scale: f32,
     palette: &Palette,
 ) {
     let metrics = r.metrics();
-    let layout = PaletteLayout::new(window, (metrics.width, metrics.height), scale, rows.len(), selected);
+    let layout = PaletteLayout::new(window, (metrics.width, metrics.height), scale, rows.len(), selected, first);
     let line = scale.round().max(1.0);
     let pad = (14.0 * scale).round();
     let text_dy = ((layout.input.h - metrics.height) / 2.0).round();
@@ -313,17 +330,31 @@ mod tests {
 
     #[test]
     fn palette_scrolls_to_keep_the_selection_visible() {
-        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 30, 0);
+        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 30, 0, 0);
         assert_eq!((layout.first, layout.rows.len()), (0, PALETTE_ROWS));
-        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 30, 20);
+        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 30, 20, 0);
         assert_eq!(layout.first, 9);
-        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 3, 2);
+        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 3, 2, 0);
         assert_eq!((layout.first, layout.rows.len()), (0, 3));
         // Clicking the second visible row picks the right command.
-        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 30, 20);
+        let layout = PaletteLayout::new((1000.0, 800.0), (8.0, 16.0), 1.0, 30, 20, 0);
         let row = layout.rows[1];
         assert_eq!(layout.row_at(row.x + 5.0, row.y + 5.0), Some(10));
         assert_eq!(layout.row_at(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn pointing_at_a_row_never_scrolls_the_list() {
+        // Scrolled down to row 20, the list shows rows 9 to 20.
+        assert_eq!(palette_scroll(30, 20, 0), 9);
+        // Highlighting any row in view, top one included, keeps it so.
+        assert_eq!(palette_scroll(30, 9, 9), 9);
+        assert_eq!(palette_scroll(30, 15, 9), 9);
+        // Going past either end scrolls just enough.
+        assert_eq!(palette_scroll(30, 8, 9), 8);
+        assert_eq!(palette_scroll(30, 21, 9), 10);
+        // A shorter list after typing a query starts over within its length.
+        assert_eq!(palette_scroll(5, 0, 9), 0);
     }
 
     #[test]

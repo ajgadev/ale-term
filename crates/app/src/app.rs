@@ -253,6 +253,9 @@ pub struct App {
     first_frame_logged: bool,
     /// The last frame showed a hovered tab's title scrolling.
     tab_scrolling: bool,
+    /// The first row the command palette shows: it scrolls only as far as
+    /// its highlight needs.
+    palette_first: usize,
     /// A tab whose title is being edited in place.
     renaming: Option<tab_rename::Renaming>,
     /// The card summarizing the agent under the pointer.
@@ -333,6 +336,7 @@ impl App {
             launched: Instant::now(),
             first_frame_logged: false,
             tab_scrolling: false,
+            palette_first: 0,
             renaming: None,
             summary: summary_panel::SummaryState::default(),
             installed_agents: None,

@@ -171,6 +171,12 @@ impl App {
             }
             _ => Vec::new(),
         };
+        // The palette's scroll follows its highlight only as far as needed.
+        self.palette_first = match &self.overlay {
+            Overlay::Palette { selected, .. } => overlay::palette_scroll(list_rows.len(), *selected, self.palette_first),
+            _ => 0,
+        };
+        let palette_first = self.palette_first;
         let start_view = self.start_view();
         let menu = match &self.overlay {
             Overlay::Menu(menu) => Some(menu),
@@ -306,10 +312,11 @@ impl App {
         match &self.overlay {
             Overlay::Palette { kind, query, selected } => {
                 let placeholder = kind.placeholder();
-                overlay::draw_palette(renderer, placeholder, query, *selected, &list_rows, window, scale, palette);
+                let first = palette_first;
+                overlay::draw_palette(renderer, placeholder, query, *selected, first, &list_rows, window, scale, palette);
             }
             Overlay::Input { kind, query } => {
-                overlay::draw_palette(renderer, kind.placeholder(), query, 0, &[], window, scale, palette);
+                overlay::draw_palette(renderer, kind.placeholder(), query, 0, 0, &[], window, scale, palette);
             }
             Overlay::Confirm(confirm) => overlay::draw_confirm(renderer, confirm, window, scale, palette),
             Overlay::Search { pane, query, failed } => {

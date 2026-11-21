@@ -397,6 +397,22 @@ impl App {
 
         self.update_hover_link();
         self.update_hover();
+        self.palette_hover(x, y);
+    }
+
+    /// The command palette's highlight follows the pointer as it moves, as
+    /// a menu's does. (Only on movement: a pointer resting over the list
+    /// leaves the arrow keys in charge.)
+    fn palette_hover(&mut self, x: f32, y: f32) {
+        let Overlay::Palette { kind, query, selected } = &self.overlay else { return };
+        let count = self.list_items(*kind, query).len();
+        let Some(row) = self.palette_layout(count, *selected).and_then(|layout| layout.row_at(x, y)) else { return };
+        if let Overlay::Palette { selected, .. } = &mut self.overlay
+            && *selected != row
+        {
+            *selected = row;
+            self.redraw();
+        }
     }
 
     /// Updates everything that depends on what is under the pointer: hover
@@ -565,7 +581,7 @@ impl App {
     pub(super) fn palette_layout(&self, count: usize, selected: usize) -> Option<PaletteLayout> {
         let metrics = self.renderer.as_ref()?.metrics();
         let cell = (metrics.width, metrics.height);
-        Some(PaletteLayout::new(self.window_size(), cell, self.scale(), count, selected))
+        Some(PaletteLayout::new(self.window_size(), cell, self.scale(), count, selected, self.palette_first))
     }
 
     /// Recomputes which link (if any) is under the mouse. Links are only
