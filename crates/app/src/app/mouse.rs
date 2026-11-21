@@ -40,6 +40,25 @@ impl App {
         self.update_hover();
     }
 
+    /// Ends a tab or sidebar-row drag when the button comes up: a row
+    /// dropped on another workspace's group moves its tab there.
+    fn finish_tab_drag(&mut self) {
+        if let Drag::Row { tab, moved: true, .. } = self.mouse.drag
+            && let Some(target) = self.sidebar.drop.take()
+            && let Some(index) = self.tabs.iter().position(|t| t.id == tab)
+        {
+            // A deliberate move sticks: the tab no longer follows its
+            // folder.
+            self.tabs[index].pinned = true;
+            self.move_tab(index, target);
+        }
+        if matches!(self.mouse.drag, Drag::Tab { .. } | Drag::Row { .. }) {
+            self.mouse.drag = Drag::None;
+            self.sidebar.drop = None;
+            self.redraw();
+        }
+    }
+
     fn mouse_press(&mut self, state: ElementState, mouse_button: MouseButton, event_loop: &ActiveEventLoop) {
         let (x, y) = (self.mouse.x, self.mouse.y);
         let code = match mouse_button {
@@ -51,6 +70,7 @@ impl App {
 
         if state == ElementState::Released {
             if mouse_button == MouseButton::Left {
+                self.finish_tab_drag();
                 if let Drag::Reported(pane) = self.mouse.drag
                     && let Some(rect) = self.active_layout().rect_of(pane)
                     && let Some(mode) = self.mouse_reporting(pane)
@@ -160,6 +180,11 @@ impl App {
         if let Some(hit) = self.sidebar_hit(x, y) {
             if mouse_button == MouseButton::Left {
                 self.sidebar_click(hit);
+                // Holding the button on a row and moving carries its tab
+                // to another workspace.
+                if let crate::sidebar::Hit::Row(target) = hit {
+                    self.mouse.drag = Drag::Row { tab: target.tab, from: (x, y), moved: false };
+                }
             }
             return;
         }
@@ -177,7 +202,13 @@ impl App {
         // Tab bar.
         if let Some(hit) = self.tab_bar().hit(x, y) {
             match (hit, mouse_button) {
-                (TabBarHit::Tab(index), MouseButton::Left) => self.select_tab(index),
+                (TabBarHit::Tab(index), MouseButton::Left) => {
+                    self.select_tab(index);
+                    // Holding the button and moving reorders the tab.
+                    if let Some(tab) = self.visible_tabs().get(index).and_then(|&i| self.tabs.get(i)) {
+                        self.mouse.drag = Drag::Tab { id: tab.id, from: (x, y), moved: false };
+                    }
+                }
                 (TabBarHit::Close(index), MouseButton::Left) | (TabBarHit::Tab(index), MouseButton::Middle) => {
                     if let Some(&tab) = self.visible_tabs().get(index) {
                         self.close_tab(tab);
@@ -303,6 +334,30 @@ impl App {
                     }
                 }
             }
+            Drag::Tab { id, from, moved } => {
+                let far = (x - from.0).abs() > DRAG_THRESHOLD * self.scale();
+                if moved || far {
+                    self.mouse.drag = Drag::Tab { id, from, moved: true };
+                    // The tab takes the place of whichever tab the pointer
+                    // is over.
+                    let bar = self.tab_bar();
+                    if let Some(position) = bar.tabs.iter().position(|tab| x >= tab.x && x < tab.x + tab.w) {
+                        self.reorder_tab(id, position);
+                    }
+                }
+            }
+            Drag::Row { tab, from, moved } => {
+                let far = (y - from.1).abs() > DRAG_THRESHOLD * self.scale();
+                if moved || far {
+                    self.mouse.drag = Drag::Row { tab, from, moved: true };
+                    let home = self.tabs.iter().find(|t| t.id == tab).map(|t| t.workspace);
+                    let over = self.sidebar_group_at(x, y).filter(|group| Some(*group) != home);
+                    if over != self.sidebar.drop {
+                        self.sidebar.drop = over;
+                        self.redraw();
+                    }
+                }
+            }
             Drag::None => {
                 if let Some(pane) = layout.pane_at(x, y)
                     && let Some(rect) = layout.rect_of(pane)
@@ -371,7 +426,8 @@ impl App {
             Drag::Divider(Divider { axis: Axis::Horizontal, .. }) => return CursorIcon::ColResize,
             Drag::Divider(Divider { axis: Axis::Vertical, .. }) => return CursorIcon::RowResize,
             Drag::Select(_) => return CursorIcon::Text,
-            Drag::Reported(_) | Drag::None => {}
+            Drag::Tab { moved: true, .. } | Drag::Row { moved: true, .. } => return CursorIcon::Grabbing,
+            Drag::Reported(_) | Drag::None | Drag::Tab { .. } | Drag::Row { .. } => {}
         }
         let metrics = self.renderer.as_ref().map(|r| r.metrics());
         let cell = metrics.map_or((8.0, 16.0), |m| (m.width, m.height));

@@ -164,6 +164,29 @@ impl App {
         self.move_tab(index, target);
     }
 
+    /// Moves the tab `id` to `position` among the tabs on screen.
+    pub(super) fn reorder_tab(&mut self, id: crate::workspace::TabId, position: usize) {
+        let visible = self.visible_tabs();
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else { return };
+        let Some(current) = visible.iter().position(|&index| index == from) else { return };
+        let position = position.min(visible.len() - 1);
+        if current == position {
+            return;
+        }
+        // Taking the tab out shifts later tabs down by one, so inserting
+        // at the target's old place puts it after the target when moving
+        // right and before it when moving left: both what is wanted.
+        let target = visible[position];
+        let active = self.tabs.get(self.active).map(|tab| tab.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(target, tab);
+        if let Some(index) = self.tabs.iter().position(|tab| Some(tab.id) == active) {
+            self.active = index;
+        }
+        self.mark_dirty();
+        self.redraw();
+    }
+
     pub(super) fn move_tab(&mut self, index: usize, target: WorkspaceId) {
         let Some(tab) = self.tabs.get_mut(index) else { return };
         if tab.workspace == target {

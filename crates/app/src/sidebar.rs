@@ -10,7 +10,7 @@ use ale_render::Renderer;
 
 use crate::draw::color;
 use crate::layout::{PaneId, Rect};
-use crate::workspace::TabId;
+use crate::workspace::{TabId, WorkspaceId};
 
 /// Which rows the sidebar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -83,6 +83,8 @@ pub enum Row {
 
 pub struct Group {
     pub title: String,
+    /// The workspace this group lists, when grouped by project.
+    pub workspace: Option<WorkspaceId>,
     pub rows: Vec<Row>,
 }
 
@@ -101,6 +103,8 @@ pub struct Model {
     pub archived: usize,
     /// What the pointer is over, drawn highlighted.
     pub hovered: Option<Hit>,
+    /// The workspace a dragged row would be dropped into.
+    pub drop: Option<WorkspaceId>,
     /// The "New session" menu is open.
     pub menu_open: bool,
 }
@@ -129,7 +133,7 @@ enum Item<'a> {
     Search,
     Chip(Filter, String),
     GroupToggle,
-    Header(&'a str),
+    Header(&'a Group),
     Row(&'a Row),
     Notice(&'a str),
 }
@@ -193,7 +197,7 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
             continue;
         }
         let header_height = line + gap * 3.0;
-        items.push(Placed { rect: Rect::new(area.x, row_y, area.w, header_height), item: Item::Header(&group.title) });
+        items.push(Placed { rect: Rect::new(area.x, row_y, area.w, header_height), item: Item::Header(group) });
         row_y += header_height;
         for row in &group.rows {
             let height = match row {
@@ -267,6 +271,32 @@ pub fn hit(model: &Model, area: Rect, cell: (f32, f32), scale: f32, scroll: f32,
         Item::Header(_) => Hit::Nothing,
     });
     Some(found.unwrap_or(Hit::Nothing))
+}
+
+/// The workspace whose group (heading or rows) is at a point, for
+/// dropping a dragged row. Below the last group counts as that group.
+pub fn group_at(
+    model: &Model,
+    area: Rect,
+    cell: (f32, f32),
+    scale: f32,
+    scroll: f32,
+    x: f32,
+    y: f32,
+) -> Option<WorkspaceId> {
+    if !area.contains(x, y) {
+        return None;
+    }
+    let (items, _) = layout(model, area, cell, scale, scroll);
+    let mut found = None;
+    for placed in &items {
+        if let Item::Header(group) = &placed.item
+            && placed.rect.y <= y
+        {
+            found = group.workspace;
+        }
+    }
+    found
 }
 
 /// Shortens `text` to `width` pixels with an ellipsis.
@@ -352,9 +382,12 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 let glyph = if model.by_status { "◐" } else { "≡" };
                 r.text(glyph, false, rect.x + cell.0, text_y, rect.w, if hovered(Hit::GroupToggle) { fg } else { dim });
             }
-            Item::Header(title) => {
-                let label = fit(title, rect.w - pad * 2.0, cell.0);
-                r.text(&label, false, rect.x + pad, rect.y + rect.h - metrics.height - gap, rect.w, dim);
+            Item::Header(group) => {
+                // Lit while a dragged row is over this group.
+                let target = model.drop.is_some() && group.workspace == model.drop;
+                let label = fit(&group.title, rect.w - pad * 2.0, cell.0);
+                let text_color = if target { color(palette.accent) } else { dim };
+                r.text(&label, target, rect.x + pad, rect.y + rect.h - metrics.height - gap, rect.w, text_color);
             }
             Item::Row(Row::Agent { target, state, title, status, agent, elapsed, current, icon }) => {
                 if !*current && hovered(Hit::Row(*target)) {
@@ -459,10 +492,32 @@ mod tests {
 
     fn model(rows: usize) -> Model {
         Model {
-            groups: vec![Group { title: "shop".into(), rows: (0..rows).map(|i| agent(1, i as u64)).collect() }],
+            groups: vec![Group { title: "shop".into(), workspace: Some(7), rows: (0..rows).map(|i| agent(1, i as u64)).collect() }],
             counts: [rows, 0, rows],
             ..Model::default()
         }
+    }
+
+    #[test]
+    fn a_dragged_row_lands_in_the_group_under_the_pointer() {
+        let mut model = model(2);
+        model.groups.push(Group { title: "blog".into(), workspace: Some(9), rows: vec![agent(2, 5)] });
+        // An empty group is not shown, so it cannot be a target.
+        model.groups.push(Group { title: "empty".into(), workspace: Some(11), rows: Vec::new() });
+        let area = Rect::new(0.0, 0.0, 260.0, 900.0);
+        let (items, _) = layout(&model, area, CELL, 1.0, 0.0);
+        let headers: Vec<Rect> =
+            items.iter().filter(|p| matches!(p.item, Item::Header(_))).map(|p| p.rect).collect();
+        assert_eq!(headers.len(), 2);
+        let at = |y: f32| group_at(&model, area, CELL, 1.0, 0.0, 100.0, y);
+        // On a heading, on its rows, and below the last group.
+        assert_eq!(at(headers[0].y + 2.0), Some(7));
+        assert_eq!(at(headers[1].y - 2.0), Some(7));
+        assert_eq!(at(headers[1].y + 2.0), Some(9));
+        assert_eq!(at(headers[1].y + 200.0), Some(9));
+        // Above the first group, and outside the sidebar.
+        assert_eq!(at(headers[0].y - 2.0), None);
+        assert_eq!(group_at(&model, area, CELL, 1.0, 0.0, 400.0, headers[0].y + 2.0), None);
     }
 
     #[test]

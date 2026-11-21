@@ -26,6 +26,8 @@ pub struct SidebarState {
     pub scroll: f32,
     /// What the pointer is over, for hover highlights.
     pub hovered: Option<Hit>,
+    /// The workspace a dragged row is over.
+    pub drop: Option<crate::workspace::WorkspaceId>,
 }
 
 /// Order of the groups when the sidebar is grouped by status: what needs
@@ -537,7 +539,7 @@ impl App {
         let mut groups = Vec::new();
         if self.sidebar.by_status {
             for state in STATUS_ORDER {
-                let mut group = Group { title: state.label().to_owned(), rows: Vec::new() };
+                let mut group = Group { title: state.label().to_owned(), workspace: None, rows: Vec::new() };
                 for (_, row_state, row) in &mut rows {
                     if *row_state == Some(state) {
                         group.rows.append(row);
@@ -547,7 +549,7 @@ impl App {
             }
         } else {
             for workspace in &self.workspaces {
-                let mut group = Group { title: workspace.name.clone(), rows: Vec::new() };
+                let mut group = Group { title: workspace.name.clone(), workspace: Some(workspace.id), rows: Vec::new() };
                 for (id, _, row) in &mut rows {
                     if *id == workspace.id {
                         group.rows.append(row);
@@ -566,6 +568,7 @@ impl App {
             notice: self.hooks_notice(),
             archived: self.archive.len(),
             hovered: self.sidebar.hovered,
+            drop: self.sidebar.drop,
             menu_open: matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == crate::menu::MenuKind::NewSession),
         }
     }
@@ -579,6 +582,12 @@ impl App {
     pub(super) fn sidebar_hit(&self, x: f32, y: f32) -> Option<Hit> {
         let (rect, cell, scale) = self.sidebar_geometry()?;
         sidebar::hit(&self.sidebar_model(), rect, cell, scale, self.sidebar.scroll, x, y)
+    }
+
+    /// The workspace whose group in the sidebar is at a point.
+    pub(super) fn sidebar_group_at(&self, x: f32, y: f32) -> Option<crate::workspace::WorkspaceId> {
+        let (rect, cell, scale) = self.sidebar_geometry()?;
+        sidebar::group_at(&self.sidebar_model(), rect, cell, scale, self.sidebar.scroll, x, y)
     }
 
     pub(super) fn sidebar_scroll(&mut self, pixels: f32) {

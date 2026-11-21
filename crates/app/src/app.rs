@@ -105,7 +105,16 @@ enum Drag {
     Divider(Divider),
     /// The click went to a program that tracks the mouse itself.
     Reported(PaneId),
+    /// Moving a tab along the tab bar. `moved` turns true once the pointer
+    /// has travelled far enough from `from` to count as a drag.
+    Tab { id: TabId, from: (f32, f32), moved: bool },
+    /// Carrying a sidebar row to another workspace's group.
+    Row { tab: TabId, from: (f32, f32), moved: bool },
 }
+
+/// How far the pointer must travel with the button down before a click
+/// becomes a drag, in points.
+const DRAG_THRESHOLD: f32 = 5.0;
 
 struct Mouse {
     x: f32,
