@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "ale-agents"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "log",
  "serde",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "ale-config"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "toml",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "ale-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "alacritty_terminal",
  "image",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "ale-render"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "ale-term"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ale-agents",
  "ale-config",
