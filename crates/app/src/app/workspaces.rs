@@ -411,6 +411,7 @@ impl App {
             hint: "Press Enter or Esc to close".into(),
             template: None,
             hooks: None,
+            close: Vec::new(),
         }));
         self.redraw();
     }
@@ -511,6 +512,7 @@ impl App {
             hint: "Enter: allow and run  ·  Esc: cancel".into(),
             template: Some((root, contents, tabs)),
             hooks: None,
+            close: Vec::new(),
         }));
         self.redraw();
     }
@@ -520,6 +522,11 @@ impl App {
         let Overlay::Confirm(confirm) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
         if let Some(kind) = confirm.hooks {
             self.install_hooks(kind);
+        }
+        for id in confirm.close {
+            if self.panes.contains_key(&id) {
+                self.close_pane(id);
+            }
         }
         if let Some((root, contents, tabs)) = confirm.template {
             if let Some(dir) = &self.state_dir

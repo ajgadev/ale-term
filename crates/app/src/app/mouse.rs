@@ -237,7 +237,7 @@ impl App {
                 }
                 (TabBarHit::Close(index), MouseButton::Left) | (TabBarHit::Tab(index), MouseButton::Middle) => {
                     if let Some(&tab) = self.visible_tabs().get(index) {
-                        self.close_tab(tab);
+                        self.ask_to_close_tab(tab);
                     }
                 }
                 (TabBarHit::Workspace, MouseButton::Left) => self.open_list(ListKind::Workspaces),
@@ -245,6 +245,7 @@ impl App {
                 (TabBarHit::Layout(layout), MouseButton::Left) => self.set_layout(layout),
                 (TabBarHit::Commands, MouseButton::Left) => self.perform(Action::CommandPalette, event_loop),
                 (TabBarHit::Split, MouseButton::Left) => self.open_split_menu(),
+                (TabBarHit::Usage, MouseButton::Left) => self.perform(Action::ShowUsage, event_loop),
                 (TabBarHit::Empty, MouseButton::Left) => {
                     let clicks = self.register_click();
                     if let Some(window) = &self.window {
@@ -436,7 +437,12 @@ impl App {
                 .filter(|hit| {
                     matches!(
                         hit,
-                        TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_) | TabBarHit::Commands | TabBarHit::Split
+                        TabBarHit::Tab(_)
+                            | TabBarHit::Close(_)
+                            | TabBarHit::Layout(_)
+                            | TabBarHit::Commands
+                            | TabBarHit::Split
+                            | TabBarHit::Usage
                     )
                 })
         };

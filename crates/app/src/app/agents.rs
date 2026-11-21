@@ -842,6 +842,7 @@ impl App {
             hint: hint.into(),
             template: None,
             hooks: (!installed).then_some(kind),
+            close: Vec::new(),
         }));
         self.redraw();
     }

@@ -65,6 +65,8 @@ pub struct Confirm {
     /// Accepting installs this agent's status hooks; dismissing declines
     /// them.
     pub hooks: Option<ale_agents::AgentKind>,
+    /// Accepting closes these panes, whose agents end with them.
+    pub close: Vec<PaneId>,
 }
 
 pub enum Overlay {

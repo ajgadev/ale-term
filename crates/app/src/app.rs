@@ -634,6 +634,63 @@ impl App {
         }
     }
 
+    /// Closes a tab because the user asked to; see [`App::ask_to_close`].
+    fn ask_to_close_tab(&mut self, index: usize) {
+        match self.tabs.get(index) {
+            Some(tab) if tab.start.is_none() => self.ask_to_close(tab.root.panes()),
+            _ => self.close_tab(index),
+        }
+    }
+
+    /// Closes panes because the user asked to. An agent running in one of
+    /// them would end with it, so the user is asked first, and told how
+    /// to get the conversation back.
+    fn ask_to_close(&mut self, panes: Vec<PaneId>) {
+        let agents: Vec<(&Pane, &ale_agents::Session)> = panes
+            .iter()
+            .filter_map(|id| self.panes.get(id))
+            .filter_map(|pane| Some((pane, pane.agent.as_ref()?)))
+            .collect();
+        if agents.is_empty() {
+            for id in panes {
+                self.close_pane(id);
+            }
+            return;
+        }
+        let mut lines = Vec::new();
+        for (pane, session) in &agents {
+            let status = Self::agent_status(session);
+            lines.push(format!("{}: {} ({status})", session.kind.name(), self.agent_title(pane, session)));
+        }
+        lines.push(String::new());
+        lines.push("To carry on later: Resume Archived Session, in the command palette.".into());
+        // Only some agents can pick a conversation up again.
+        let mut fresh = Vec::new();
+        for (_, session) in &agents {
+            match ale_agents::archive::resume_command(session.kind, session.session_id.as_deref()) {
+                Some(command) => lines.push(format!("Or in any terminal: {command}")),
+                None if !fresh.contains(&session.kind.name()) => fresh.push(session.kind.name()),
+                None => {}
+            }
+        }
+        if !fresh.is_empty() {
+            lines.push(format!("{}: resuming starts a new conversation.", fresh.join(", ")));
+        }
+        let title = match agents.as_slice() {
+            [(_, session)] => format!("Close {}?", session.kind.name()),
+            _ => format!("Close {} agents?", agents.len()),
+        };
+        self.overlay = Overlay::Confirm(Box::new(overlay::Confirm {
+            title,
+            lines,
+            hint: "Enter: close  ·  Esc: keep open".into(),
+            template: None,
+            hooks: None,
+            close: panes,
+        }));
+        self.redraw();
+    }
+
     /// Shows the tab at position `index` of the tab bar.
     fn select_tab(&mut self, index: usize) {
         if let Some(&tab) = self.visible_tabs().get(index)
@@ -755,10 +812,10 @@ impl App {
                 if self.start_page().is_some() {
                     self.close_tab(self.active);
                 } else if let Some(id) = self.focused_pane_id() {
-                    self.close_pane(id);
+                    self.ask_to_close(vec![id]);
                 }
             }
-            Action::CloseTab => self.close_tab(self.active),
+            Action::CloseTab => self.ask_to_close_tab(self.active),
             Action::RenameTab => {
                 let query = self.tabs.get(self.active).and_then(|t| t.custom_title.clone()).unwrap_or_default();
                 self.overlay = Overlay::Input { kind: InputKind::RenameTab, query };

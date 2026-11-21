@@ -42,6 +42,8 @@ pub struct TabBar {
     pub commands: Rect,
     /// The button that opens the split menu, left of the command menu's.
     pub split: Rect,
+    /// The button that shows the agents' usage, left of the split button.
+    pub usage: Rect,
 }
 
 /// The layout each half of the switch stands for.
@@ -93,6 +95,8 @@ pub enum TabBarHit {
     Commands,
     /// The button that opens the split menu.
     Split,
+    /// The button that shows the agents' usage.
+    Usage,
     /// Empty space, used for dragging the window.
     Empty,
 }
@@ -128,7 +132,8 @@ impl TabBar {
         let switch = [0.0, 1.0].map(|i| Rect::new(switch_x + i * segment, top + inset, segment, height - inset * 2.0));
         let commands = Rect::new(switch_x - inset - segment, top + inset, segment, height - inset * 2.0);
         let split = Rect::new(commands.x - inset - segment, top + inset, segment, height - inset * 2.0);
-        let available = (split.x - inset - left - button).max(0.0);
+        let usage = Rect::new(split.x - inset - segment, top + inset, segment, height - inset * 2.0);
+        let available = (usage.x - inset - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
 
         let tabs: Vec<Rect> = (0..tab_count)
@@ -156,6 +161,7 @@ impl TabBar {
             switch,
             commands,
             split,
+            usage,
         }
     }
 
@@ -175,6 +181,9 @@ impl TabBar {
         }
         if self.split.contains(x, y) {
             return Some(TabBarHit::Split);
+        }
+        if self.usage.contains(x, y) {
+            return Some(TabBarHit::Usage);
         }
         if let Some(index) = self.close.iter().position(|close| close.contains(x, y)) {
             return Some(TabBarHit::Close(index));
@@ -376,7 +385,26 @@ impl TabBar {
         let ink = if over { palette.foreground } else { palette.chrome_text_dim };
         r.text("⌘", false, glyph_x, glyph_y, commands.w, color(ink));
         self.draw_split_button(r, hovered == Some(TabBarHit::Split), scale, palette);
+        self.draw_usage_button(r, hovered == Some(TabBarHit::Usage), scale, palette);
         scrolling
+    }
+
+    /// The usage button: a small bar chart, framed like its neighbours.
+    fn draw_usage_button(&self, r: &mut Renderer, over: bool, scale: f32, palette: &Palette) {
+        let line = scale.round().max(1.0);
+        let button = self.usage;
+        outline(r, button, line, color(palette.border));
+        if over {
+            r.rect(button.x + line, button.y + line, button.w - line * 2.0, button.h - line * 2.0, color(palette.border));
+        }
+        let ink = color(if over { palette.foreground } else { palette.chrome_text_dim });
+        let (bar, gap, h) = ((3.0 * scale).round(), (2.0 * scale).round(), (11.0 * scale).round());
+        let w = bar * 3.0 + gap * 2.0;
+        let (x, bottom) = (button.x + ((button.w - w) / 2.0).round(), button.y + ((button.h + h) / 2.0).round());
+        for (i, part) in [0.45, 1.0, 0.7].iter().enumerate() {
+            let tall = (h * part).round();
+            r.rect(x + i as f32 * (bar + gap), bottom - tall, bar, tall, ink);
+        }
     }
 
     /// The split button: a small window divided down the middle, framed
@@ -522,7 +550,9 @@ mod tests {
         let bar = TabBar::layout(3, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         let [sidebar, board] = bar.switch;
         assert!(board.x + board.w <= 1000.0 && sidebar.x + sidebar.w <= board.x + 0.5);
-        assert!(bar.new_tab.x + bar.new_tab.w <= bar.split.x);
+        assert!(bar.new_tab.x + bar.new_tab.w <= bar.usage.x);
+        assert!(bar.usage.x + bar.usage.w <= bar.split.x);
+        assert_eq!(bar.hit(bar.usage.x + 3.0, 19.0), Some(TabBarHit::Usage));
         // The command menu's button is just left of the switch, and the
         // split button left of that.
         assert!(bar.commands.x + bar.commands.w <= sidebar.x);
