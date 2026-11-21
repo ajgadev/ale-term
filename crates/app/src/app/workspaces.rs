@@ -382,7 +382,7 @@ impl App {
             lines,
             hint: "Press Enter or Esc to close".into(),
             template: None,
-            install_hooks: false,
+            hooks: None,
         }));
         self.redraw();
     }
@@ -482,7 +482,7 @@ impl App {
             lines,
             hint: "Enter: allow and run  ·  Esc: cancel".into(),
             template: Some((root, contents, tabs)),
-            install_hooks: false,
+            hooks: None,
         }));
         self.redraw();
     }
@@ -490,8 +490,8 @@ impl App {
     /// The user pressed Enter on a confirmation.
     pub(super) fn confirm_accepted(&mut self) {
         let Overlay::Confirm(confirm) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
-        if confirm.install_hooks {
-            self.install_hooks();
+        if let Some(kind) = confirm.hooks {
+            self.install_hooks(kind);
         }
         if let Some((root, contents, tabs)) = confirm.template {
             if let Some(dir) = &self.state_dir

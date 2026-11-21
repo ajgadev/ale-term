@@ -164,7 +164,19 @@ pub fn run_hook_client(agent: &str, event: &str, tty: Option<u64>, state_dir: Op
     if input.take(MAX_MESSAGE - 4096).read_to_string(&mut text).is_err() {
         return;
     }
-    let payload = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let mut payload = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    // Kiro hands a hook the prompt in the environment, not in its data.
+    if agent == "kiro"
+        && payload.get("prompt").is_none()
+        && let Ok(prompt) = std::env::var("USER_PROMPT")
+    {
+        if !payload.is_object() {
+            payload = serde_json::json!({});
+        }
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("prompt".into(), prompt.into());
+        }
+    }
     let message = HookMessage {
         pane: pane.unwrap_or(0),
         tty,

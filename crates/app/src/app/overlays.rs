@@ -154,8 +154,10 @@ impl App {
 
     pub(super) fn close_overlay(&mut self) {
         // Dismissing the hook offer is an answer: do not ask again.
-        if matches!(&self.overlay, Overlay::Confirm(confirm) if confirm.install_hooks) {
-            self.decline_hooks();
+        if let Overlay::Confirm(confirm) = &self.overlay
+            && let Some(kind) = confirm.hooks
+        {
+            self.decline_hooks(kind);
         }
         self.overlay = Overlay::None;
         self.redraw();

@@ -62,8 +62,9 @@ pub struct Confirm {
     /// contents and the tabs it defines. `None` for purely informational
     /// messages.
     pub template: Option<(PathBuf, String, Vec<TabTemplate>)>,
-    /// Accepting installs the agent status hooks; dismissing declines them.
-    pub install_hooks: bool,
+    /// Accepting installs this agent's status hooks; dismissing declines
+    /// them.
+    pub hooks: Option<ale_agents::AgentKind>,
 }
 
 pub enum Overlay {

@@ -101,8 +101,19 @@ How the status is known:
   added to `~/.claude/settings.json`, keep your other settings, leave a
   backup next to the file, and do nothing outside ale-term. "Remove Claude
   Code Status Hooks" takes them out again.
-- **Without hooks** (Codex, Gemini CLI, Kiro, OpenCode, and Claude Code
-  until its hooks are installed) the agent is recognized by its command and
+- **Kiro** (Kiro CLI 3, its v3 engine) reports it through hooks too,
+  offered the same way ("Set Up Kiro Status Hooks"). Kiro loads hooks from
+  every file in `~/.kiro/hooks/`, so ale-term writes one file of its own
+  there, `ale-term.json`, and changes none of yours; "Remove Kiro Status
+  Hooks" deletes it. The hooks print nothing and always succeed, so they
+  never approve, block or alter anything Kiro does (a permission prompt
+  still asks you), and each is given at most 5 seconds. Kiro's tools are
+  shown like Claude Code's ("Editing README.md", "Running cargo test").
+  This follows Kiro's published hook format and was tested by running the
+  hooks' commands as Kiro would, not inside a live Kiro session. Kiro does
+  not report subagents to its hooks, so the graph shows only the agent.
+- **Without hooks** (Codex, Gemini CLI, OpenCode, and Claude Code or Kiro
+  until their hooks are installed) the agent is recognized by its command and
   followed by watching the pane. A steady stream of updates lasting over a
   second (a spinner) means working, silence afterwards means done, and a
   bell or notification request means the agent wants you. This is a guess:
@@ -110,6 +121,10 @@ How the status is known:
   Idle for an agent that works without animating anything.
 
 Status travels over a Unix socket on this Mac; nothing uses the network.
+
+The same can be done from a shell: `ale-term hooks status` says what is
+installed, and `ale-term hooks install claude` (or `kiro`) and `ale-term
+hooks remove claude` (or `kiro`) add and take out the hooks.
 
 **Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
 Working, Done and Idle. Click a card, or move with the arrow keys and press
@@ -151,11 +166,11 @@ Session Archive" in the palette empties it.
 --resume <id>` typed at its prompt; press Enter to continue that
 conversation.
 
-Codex, Gemini CLI and Kiro have hook systems of their own, and `ale-term
-hook <agent>` already understands their events, but installing into their
+Codex and Gemini CLI have hook systems of their own, and `ale-term hook
+<agent>` already understands their events, but installing into their
 settings is not automated because it could not be tested here. To wire one
 up by hand, register this as the command for each of the agent's hook
-events (replace `codex` with `gemini` or `kiro`):
+events (replace `codex` with `gemini`):
 
     "${ALE_TERM_BIN:-true}" hook codex
 
@@ -250,8 +265,9 @@ What it stores, all under `~/.config/ale-term/`:
 
 Nothing a terminal or an agent printed is ever written to disk. It reads
 Claude Code's own conversation files under `~/.claude` to show a subagent's
-output, and writes to `~/.claude/settings.json` only if you ask it to
-install the status hooks.
+output. It writes to `~/.claude/settings.json`, or creates
+`~/.kiro/hooks/ale-term.json`, only if you ask it to install that agent's
+status hooks.
 
 ## Rendering and memory
 

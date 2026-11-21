@@ -76,7 +76,11 @@ impl App {
         if let Some(path) = install::claude_settings_path() {
             self.claude_hooks = install::claude_installed_at(&path);
         }
+        if let Some(path) = install::kiro_hooks_path() {
+            self.kiro_hooks = install::kiro_installed_at(&path);
+        }
         self.hooks_declined = state_dir.join("hooks-declined").exists();
+        self.kiro_hooks_declined = state_dir.join("kiro-hooks-declined").exists();
     }
 
     /// Environment variables that let a hook find this window and say which
@@ -618,7 +622,7 @@ impl App {
                 self.sidebar.scroll = 0.0;
             }
             Hit::Search => self.sidebar.searching = true,
-            Hit::Notice => self.offer_hooks(),
+            Hit::Notice => self.offer_pending_hooks(),
             Hit::NewSession => self.open_new_session_menu(),
             Hit::Archive => self.open_list(ListKind::Archive),
             Hit::TitleBar => {
@@ -736,21 +740,61 @@ impl App {
         Some(self.launched + Duration::from_millis(next as u64))
     }
 
-    fn hooks_notice(&self) -> Option<String> {
-        if self.claude_hooks || self.hooks_declined {
-            return None;
-        }
-        let claude_running = self
-            .panes
-            .values()
-            .any(|pane| pane.agent.as_ref().is_some_and(|session| session.kind == AgentKind::Claude));
-        claude_running.then(|| "Set up Claude Code status…".to_owned())
+    /// The agent whose status hooks are worth offering: one is running
+    /// without them and the user has not said no.
+    fn pending_hooks(&self) -> Option<AgentKind> {
+        [AgentKind::Claude, AgentKind::Kiro].into_iter().find(|kind| {
+            !self.hooks_installed(*kind)
+                && !self.hooks_declined(*kind)
+                && self.panes.values().any(|pane| pane.agent.as_ref().is_some_and(|session| session.kind == *kind))
+        })
     }
 
-    /// Explains the hook installation and asks for a decision.
-    pub(super) fn offer_hooks(&mut self) {
-        let lines = if self.claude_hooks {
-            vec!["Claude Code's status hooks are already installed.".to_owned()]
+    /// The hint shown in the sidebar while such an agent is running.
+    /// Nothing is installed without the user asking.
+    fn hooks_notice(&self) -> Option<String> {
+        self.pending_hooks().map(|kind| format!("Set up {} status…", kind.name()))
+    }
+
+    /// The sidebar hint was clicked.
+    fn offer_pending_hooks(&mut self) {
+        if let Some(kind) = self.pending_hooks() {
+            self.offer_hooks(kind);
+        }
+    }
+
+    fn hooks_installed(&self, kind: AgentKind) -> bool {
+        match kind {
+            AgentKind::Kiro => self.kiro_hooks,
+            _ => self.claude_hooks,
+        }
+    }
+
+    fn hooks_declined(&self, kind: AgentKind) -> bool {
+        match kind {
+            AgentKind::Kiro => self.kiro_hooks_declined,
+            _ => self.hooks_declined,
+        }
+    }
+
+    /// Explains the hook installation for `kind` (Claude Code or Kiro) and
+    /// asks for a decision.
+    pub(super) fn offer_hooks(&mut self, kind: AgentKind) {
+        let installed = self.hooks_installed(kind);
+        let name = kind.name();
+        let lines = if installed {
+            vec![format!("{name}'s status hooks are already installed.")]
+        } else if kind == AgentKind::Kiro {
+            vec![
+                "ale-term can show when Kiro is working, has finished, or needs".to_owned(),
+                "you. For that, Kiro has to report its status.".to_owned(),
+                String::new(),
+                "This writes ~/.kiro/hooks/ale-term.json, a file of ale-term's own:".to_owned(),
+                "none of your Kiro files change, and removing the hooks deletes it.".to_owned(),
+                "The hooks only notify ale-term on this Mac; they never approve or".to_owned(),
+                "block anything, and do nothing in any other terminal. They need".to_owned(),
+                "Kiro CLI 3 (its v3 engine); new Kiro sessions pick them up.".to_owned(),
+            ]
         } else {
             vec![
                 "ale-term can show when Claude Code is working, has finished,".to_owned(),
@@ -762,45 +806,73 @@ impl App {
                 "do nothing. Sessions already running pick it up after a restart.".to_owned(),
             ]
         };
-        let hint = if self.claude_hooks { "Press Enter or Esc to close" } else { "Enter: install  ·  Esc: not now" };
+        let hint = if installed { "Press Enter or Esc to close" } else { "Enter: install  ·  Esc: not now" };
         self.overlay = Overlay::Confirm(Box::new(Confirm {
-            title: "Show Claude Code's status?".into(),
+            title: format!("Show {name}'s status?"),
             lines,
             hint: hint.into(),
             template: None,
-            install_hooks: !self.claude_hooks,
+            hooks: (!installed).then_some(kind),
         }));
         self.redraw();
     }
 
-    pub(super) fn install_hooks(&mut self) {
-        let Some(path) = install::claude_settings_path() else { return };
-        match install::install_claude_at(&path) {
-            Ok(()) => self.claude_hooks = true,
-            Err(error) => self.show_message("Hooks were not installed", vec![error]),
+    pub(super) fn install_hooks(&mut self, kind: AgentKind) {
+        let result = match kind {
+            AgentKind::Kiro => install::kiro_hooks_path().map(|path| install::install_kiro_at(&path)),
+            _ => install::claude_settings_path().map(|path| install::install_claude_at(&path)),
+        };
+        match result {
+            Some(Ok(())) => self.set_hooks_installed(kind, true),
+            Some(Err(error)) => self.show_message("Hooks were not installed", vec![error]),
+            None => {}
         }
         self.redraw();
     }
 
-    pub(super) fn remove_hooks(&mut self) {
-        let Some(path) = install::claude_settings_path() else { return };
-        match install::uninstall_claude_at(&path) {
-            Ok(()) => {
-                self.claude_hooks = false;
+    pub(super) fn remove_hooks(&mut self, kind: AgentKind) {
+        let result = match kind {
+            AgentKind::Kiro => install::kiro_hooks_path().map(|path| install::uninstall_kiro_at(&path)),
+            _ => install::claude_settings_path().map(|path| install::uninstall_claude_at(&path)),
+        };
+        match result {
+            Some(Ok(())) => {
+                self.set_hooks_installed(kind, false);
                 // Removing them is a decision too: do not nag afterwards.
-                self.decline_hooks();
-                self.show_message("Hooks removed", vec!["Claude Code's settings no longer mention ale-term.".into()]);
+                self.decline_hooks(kind);
+                let done = match kind {
+                    AgentKind::Kiro => "~/.kiro/hooks/ale-term.json is gone.",
+                    _ => "Claude Code's settings no longer mention ale-term.",
+                };
+                self.show_message("Hooks removed", vec![done.into()]);
             }
-            Err(error) => self.show_message("Hooks were not removed", vec![error]),
+            Some(Err(error)) => self.show_message("Hooks were not removed", vec![error]),
+            None => {}
+        }
+    }
+
+    fn set_hooks_installed(&mut self, kind: AgentKind, installed: bool) {
+        match kind {
+            AgentKind::Kiro => self.kiro_hooks = installed,
+            _ => self.claude_hooks = installed,
         }
     }
 
     /// Remembers that the user said no, so the hint stops appearing.
-    pub(super) fn decline_hooks(&mut self) {
-        self.hooks_declined = true;
+    pub(super) fn decline_hooks(&mut self, kind: AgentKind) {
+        let file = match kind {
+            AgentKind::Kiro => {
+                self.kiro_hooks_declined = true;
+                "kiro-hooks-declined"
+            }
+            _ => {
+                self.hooks_declined = true;
+                "hooks-declined"
+            }
+        };
         if let Some(dir) = &self.state_dir {
             let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::write(dir.join("hooks-declined"), "");
+            let _ = std::fs::write(dir.join(file), "");
         }
     }
 }

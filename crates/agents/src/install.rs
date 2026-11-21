@@ -5,8 +5,10 @@
 //! keeping everything else (including key order) as it was, and leaving a
 //! backup of the original next to it the first time.
 //!
-//! Only Claude Code's settings format is handled here; it is the one that
-//! could be verified against the real agent.
+//! Claude Code's hooks go into its settings file, next to the user's own.
+//! Kiro reads hooks from every file in `~/.kiro/hooks/`, so for Kiro we
+//! write a file of our own there and never touch the user's: removing our
+//! hooks means deleting that file.
 
 use std::path::{Path, PathBuf};
 
@@ -147,6 +149,98 @@ pub fn uninstall_claude_at(path: &Path) -> Result<(), String> {
     write_settings(path, &settings)
 }
 
+// ---- Kiro -------------------------------------------------------------------
+
+/// The Kiro CLI events we listen to (Kiro 3.x trigger names).
+pub const KIRO_EVENTS: [&str; 8] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PermissionRequest",
+    "PreCompact",
+    "Stop",
+    "SessionEnd",
+];
+
+/// How long Kiro may wait for one of our hooks, in seconds. Kiro waits for
+/// hooks to finish; ours only hands a line to a local socket, so this is a
+/// safety net that keeps any problem from stalling the agent.
+const KIRO_TIMEOUT: u64 = 5;
+
+/// The command a Kiro hook runs for `event`.
+///
+/// The event is named on the command line, so we do not depend on how Kiro
+/// spells it in the data it sends. `|| true` makes the hook always succeed:
+/// Kiro blocks a tool when its PreToolUse hook fails. The hook prints
+/// nothing, which Kiro takes as "no opinion": for a permission request it
+/// shows its usual prompt, so the hook can never approve anything.
+pub fn kiro_hook_command(event: &str) -> String {
+    format!("{} {event} || true", hook_command("kiro"))
+}
+
+/// Our hooks file for Kiro, in the format of `~/.kiro/hooks/*.json`.
+pub fn kiro_hook_file() -> Value {
+    let hooks: Vec<Value> = KIRO_EVENTS
+        .iter()
+        .map(|event| {
+            json!({
+                "name": format!("ale-term status ({event})"),
+                "description": "Tells ale-term what this Kiro session is doing. Does nothing outside ale-term.",
+                "trigger": event,
+                "action": { "type": "command", "command": kiro_hook_command(event) },
+                "timeout": KIRO_TIMEOUT,
+            })
+        })
+        .collect();
+    json!({ "version": "v1", "hooks": hooks })
+}
+
+/// Where our Kiro hooks file goes: Kiro CLI loads every file in
+/// `~/.kiro/hooks/`, for every agent.
+pub fn kiro_hooks_path() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".kiro").join("hooks").join("ale-term.json"))
+}
+
+/// Whether Kiro looks installed: its settings folder exists.
+pub fn kiro_present() -> bool {
+    std::env::var_os("HOME").is_some_and(|home| PathBuf::from(home).join(".kiro").is_dir())
+}
+
+/// Whether our hooks file at `path` is there and hooks every event.
+pub fn kiro_installed_at(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(file) = serde_json::from_str::<Value>(&text) else { return false };
+    let Some(hooks) = file["hooks"].as_array() else { return false };
+    KIRO_EVENTS.iter().all(|event| {
+        hooks.iter().any(|hook| hook["trigger"] == *event && hook["action"]["command"] == kiro_hook_command(event))
+    })
+}
+
+/// Writes our hooks file, replacing an older one of ours.
+pub fn install_kiro_at(path: &Path) -> Result<(), String> {
+    let describe = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(describe)?;
+    }
+    let mut text = serde_json::to_string_pretty(&kiro_hook_file()).map_err(|e| e.to_string())?;
+    text.push('\n');
+    // Kiro would read any `.json` file here, so the half-written one must
+    // not end in `.json`.
+    let temporary = path.with_extension("ale-term-tmp");
+    std::fs::write(&temporary, text).map_err(describe)?;
+    std::fs::rename(&temporary, path).map_err(describe)
+}
+
+/// Deletes our hooks file. Nothing else in Kiro's folders is touched.
+pub fn uninstall_kiro_at(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot remove {}: {e}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +336,65 @@ mod tests {
         std::fs::write(&path, "{ broken").unwrap();
         assert!(install_claude_at(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_kiro_file_hooks_every_event_and_can_never_block_or_approve() {
+        let file = kiro_hook_file();
+        assert_eq!(file["version"], "v1");
+        let hooks = file["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), KIRO_EVENTS.len());
+        for (hook, event) in hooks.iter().zip(KIRO_EVENTS) {
+            assert_eq!(hook["trigger"], event);
+            assert_eq!(hook["action"]["type"], "command");
+            assert_eq!(hook["timeout"], KIRO_TIMEOUT);
+        }
+        // Outside ale-term the command does nothing, prints nothing and
+        // succeeds, and it succeeds even when the hook itself fails.
+        for unset in [true, false] {
+            let mut command = std::process::Command::new("sh");
+            command.arg("-c").arg(kiro_hook_command("PreToolUse"));
+            if unset {
+                command.env_remove(ENV_BIN);
+            } else {
+                command.env(ENV_BIN, "/nonexistent/ale-term");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success() && output.stdout.is_empty(), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn kiro_hooks_install_and_remove_only_our_own_file() {
+        let dir = std::env::temp_dir().join(format!("ale-term-kiro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hooks = dir.join(".kiro").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let theirs = hooks.join("lint.json");
+        std::fs::write(&theirs, "{\"version\":\"v1\",\"hooks\":[]}").unwrap();
+        let ours = hooks.join("ale-term.json");
+
+        assert!(!kiro_installed_at(&ours));
+        install_kiro_at(&ours).unwrap();
+        assert!(kiro_installed_at(&ours));
+        install_kiro_at(&ours).unwrap();
+        assert!(kiro_installed_at(&ours));
+        // Only our file and the user's are there: no temporary left over.
+        let mut names: Vec<String> =
+            std::fs::read_dir(&hooks).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["ale-term.json", "lint.json"]);
+
+        uninstall_kiro_at(&ours).unwrap();
+        assert!(!ours.exists() && theirs.exists());
+        uninstall_kiro_at(&ours).unwrap();
+
+        // A file that lost one of our events no longer counts as installed.
+        let mut file = kiro_hook_file();
+        file["hooks"].as_array_mut().unwrap().pop();
+        std::fs::write(&ours, file.to_string()).unwrap();
+        assert!(!kiro_installed_at(&ours));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

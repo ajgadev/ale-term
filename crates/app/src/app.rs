@@ -203,6 +203,9 @@ pub struct App {
     claude_hooks: bool,
     /// The user said no to installing them.
     hooks_declined: bool,
+    /// The same two for Kiro, whose hooks live in a file of our own.
+    kiro_hooks: bool,
+    kiro_hooks_declined: bool,
     last_sound: Instant,
     /// When the sidebar's elapsed times are next refreshed.
     elapsed_refresh: Option<Instant>,
@@ -271,6 +274,8 @@ impl App {
             dock: dock_panel::DockState::default(),
             claude_hooks: false,
             hooks_declined: false,
+            kiro_hooks: false,
+            kiro_hooks_declined: false,
             last_sound: Instant::now(),
             elapsed_refresh: None,
             icon_size: 0,
@@ -724,8 +729,10 @@ impl App {
                 self.redraw();
             }
             Action::NextAttention => self.next_attention(),
-            Action::SetUpHooks => self.offer_hooks(),
-            Action::RemoveHooks => self.remove_hooks(),
+            Action::SetUpHooks => self.offer_hooks(ale_agents::AgentKind::Claude),
+            Action::RemoveHooks => self.remove_hooks(ale_agents::AgentKind::Claude),
+            Action::SetUpKiroHooks => self.offer_hooks(ale_agents::AgentKind::Kiro),
+            Action::RemoveKiroHooks => self.remove_hooks(ale_agents::AgentKind::Kiro),
             Action::SplitRight => self.split(Axis::Horizontal),
             Action::SplitDown => self.split(Axis::Vertical),
             Action::NextTab => self.cycle_tab(1),
