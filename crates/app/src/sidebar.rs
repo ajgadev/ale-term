@@ -374,10 +374,13 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 let right = rect.x + rect.w - pad;
 
                 r.image(*icon, rect.x + pad, first, size, size, [0.0, 0.0, 1.0, 1.0]);
-                let radius = (3.0 * scale).round();
-                let behind = if *current { palette.background } else { palette.chrome };
-                crate::draw::dot(r, rect.x + pad + size, first + radius, radius + line, color(behind));
-                crate::draw::dot(r, rect.x + pad + size, first + radius, radius, state_rgb);
+                // A busy agent's icon spins instead of carrying a dot.
+                if !matches!(state, AgentState::Working | AgentState::WaitingOnSubagents) {
+                    let radius = (3.0 * scale).round();
+                    let behind = if *current { palette.background } else { palette.chrome };
+                    crate::draw::dot(r, rect.x + pad + size, first + radius, radius + line, color(behind));
+                    crate::draw::dot(r, rect.x + pad + size, first + radius, radius, state_rgb);
+                }
                 let elapsed_width = r.text_width(elapsed);
                 r.text(elapsed, false, right - elapsed_width, first, elapsed_width, dim);
                 let title = fit(title, right - elapsed_width - cell.0 - text_x, cell.0);

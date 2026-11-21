@@ -121,6 +121,7 @@ impl App {
         let graph = self.graph_rect().and_then(|rect| Some((rect, self.graph_model()?)));
         let layout = self.active_layout();
         let tab_bar = self.tab_bar();
+        let spinner_frame = self.spinner_frame();
         let visible = self.visible_tabs();
         let titles: Vec<crate::chrome::TabLabel> = visible
             .iter()
@@ -134,8 +135,12 @@ impl App {
                     detail: session
                         .filter(|session| session.state == ale_agents::AgentState::Working)
                         .and_then(|session| session.activity.clone()),
-                    dot: self.tab_state(tab).map(|state| crate::sidebar::state_color(state, &self.palette)),
-                    icon: session.map(|session| crate::icons::key(session.kind)),
+                    // A busy agent's spinner says it all; no dot on top.
+                    dot: self
+                        .tab_state(tab)
+                        .filter(|_| !session.is_some_and(|session| agents::spins(session.state)))
+                        .map(|state| crate::sidebar::state_color(state, &self.palette)),
+                    icon: session.map(|session| self.agent_icon(session)),
                 }
             })
             .collect();
@@ -186,8 +191,16 @@ impl App {
             if self.icon_size != icon_size || !renderer.has_image(key) {
                 renderer.upload_image(key, icon_size, icon_size, &crate::icons::render(kind, icon_size));
             }
+            for frame in 0..crate::icons::SPINNER_FRAMES {
+                let key = crate::icons::spinner_key(kind, frame);
+                if self.icon_size != icon_size || !renderer.has_image(key) {
+                    let pixels = crate::icons::render_spinner(kind, icon_size, frame);
+                    renderer.upload_image(key, icon_size, icon_size, &pixels);
+                }
+            }
         }
         self.icon_size = icon_size;
+        self.spinner_shown = spinner_frame;
 
         renderer.begin(color(palette.background));
         for (id, rect) in &layout.panes {

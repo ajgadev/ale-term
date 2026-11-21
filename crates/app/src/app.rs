@@ -177,6 +177,9 @@ pub struct App {
     elapsed_refresh: Option<Instant>,
     /// Pixel size the agent icons were last drawn at.
     icon_size: u32,
+    /// The spinner picture in the last frame drawn, to know when the
+    /// next one is due.
+    spinner_shown: u64,
     /// When the last frame was drawn, and when a postponed one is due.
     last_frame: Instant,
     frame_due: Option<Instant>,
@@ -232,6 +235,7 @@ impl App {
             last_sound: Instant::now(),
             elapsed_refresh: None,
             icon_size: 0,
+            spinner_shown: 0,
             last_frame: Instant::now() - FRAME_INTERVAL,
             frame_due: None,
             modifiers: ModifiersState::empty(),
@@ -1058,6 +1062,9 @@ impl ApplicationHandler<UserEvent> for App {
             wake_at(at);
         }
         if let Some(at) = self.refresh_elapsed() {
+            wake_at(at);
+        }
+        if let Some(at) = self.tick_spinner() {
             wake_at(at);
         }
 

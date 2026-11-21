@@ -88,6 +88,46 @@ pub fn render(kind: AgentKind, size: u32) -> Vec<u8> {
     pixels
 }
 
+/// How many pictures make one turn of the spinner, and how long each
+/// shows: about one turn a second.
+pub const SPINNER_FRAMES: u64 = 12;
+pub const SPINNER_FRAME_TIME: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Renderer image key for one picture of an agent's spinner.
+pub fn spinner_key(kind: AgentKind, frame: u64) -> u64 {
+    0xA1E2_0000 + kind as u64 * 0x100 + frame % SPINNER_FRAMES
+}
+
+/// Draws one picture of the spinner shown while an agent works: its icon,
+/// a little smaller, inside an arc that goes round (frame by frame), the
+/// arc fading towards its tail.
+pub fn render_spinner(kind: AgentKind, size: u32, frame: u64) -> Vec<u8> {
+    use std::f32::consts::TAU;
+    let [r, g, b] = color(kind);
+    let half = size as f32 / 2.0;
+    let inner = 0.56;
+    let head = (frame % SPINNER_FRAMES) as f32 / SPINNER_FRAMES as f32 * TAU;
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for py in 0..size {
+        for px in 0..size {
+            let x = (px as f32 + 0.5 - half) / half;
+            let y = (py as f32 + 0.5 - half) / half;
+            let icon = shape(kind, x / inner, y / inner) * inner * half;
+            let icon_alpha = (0.5 - icon).clamp(0.0, 1.0);
+            // The ring, as thick as the icon's strokes.
+            let ring = ((x * x + y * y).sqrt() - 0.86).abs() - 0.1;
+            let ring_alpha = (0.5 - ring * half).clamp(0.0, 1.0);
+            // How far behind the head this point is, as a share of a turn
+            // (clockwise on screen); the arc covers three quarters.
+            let behind = (head - y.atan2(x)).rem_euclid(TAU) / TAU;
+            let fade = if behind < 0.75 { 1.0 - behind / 0.75 } else { 0.0 };
+            let alpha = icon_alpha.max(ring_alpha * fade);
+            pixels.extend_from_slice(&[r as u8, g as u8, b as u8, (alpha * 255.0) as u8]);
+        }
+    }
+    pixels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +149,27 @@ mod tests {
         let keys: std::collections::HashSet<u64> = AgentKind::ALL.iter().map(|kind| key(*kind)).collect();
         assert_eq!(keys.len(), AgentKind::ALL.len());
         // Icon keys can never collide with a pane's images.
+        assert!(keys.iter().all(|key| key >> 32 == 0));
+    }
+
+    #[test]
+    fn the_spinner_turns() {
+        let frames: Vec<Vec<u8>> = (0..SPINNER_FRAMES).map(|f| render_spinner(AgentKind::Claude, 32, f)).collect();
+        // Every picture differs from the next, and the frames loop.
+        for pair in frames.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+        assert_eq!(render_spinner(AgentKind::Claude, 32, SPINNER_FRAMES), frames[0]);
+        // Keys are distinct from each other and from the plain icons, and
+        // never collide with a pane's images.
+        let mut keys = std::collections::HashSet::new();
+        for kind in AgentKind::ALL {
+            keys.insert(key(kind));
+            for frame in 0..SPINNER_FRAMES {
+                keys.insert(spinner_key(kind, frame));
+            }
+        }
+        assert_eq!(keys.len(), AgentKind::ALL.len() * (SPINNER_FRAMES as usize + 1));
         assert!(keys.iter().all(|key| key >> 32 == 0));
     }
 }

@@ -529,7 +529,7 @@ impl App {
                     agent: if self.sidebar.by_status { workspace_name.to_owned() } else { session.kind.name().to_owned() },
                     elapsed: sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
                     current,
-                    icon: crate::icons::key(session.kind),
+                    icon: self.agent_icon(session),
                 }];
                 for (index, subagent) in session.subagents.iter().enumerate() {
                     // Running ones, and those that finished a moment ago.
@@ -703,6 +703,44 @@ impl App {
 
     /// The hint shown in the sidebar while Claude Code is running without
     /// its status hooks. Nothing is installed without the user asking.
+    /// The picture shown for an agent: its icon, or while it is busy, the
+    /// current picture of its spinner.
+    pub(super) fn agent_icon(&self, session: &Session) -> u64 {
+        if spins(session.state) {
+            crate::icons::spinner_key(session.kind, self.spinner_frame())
+        } else {
+            crate::icons::key(session.kind)
+        }
+    }
+
+    /// Which picture of the spinner shows now. All spinners turn together.
+    pub(super) fn spinner_frame(&self) -> u64 {
+        let step = crate::icons::SPINNER_FRAME_TIME.as_millis();
+        (self.launched.elapsed().as_millis() / step) as u64 % crate::icons::SPINNER_FRAMES
+    }
+
+    /// While a busy agent's icon is on screen, redraws when its spinner's
+    /// next picture is due. Returns when that is.
+    pub(super) fn tick_spinner(&mut self) -> Option<Instant> {
+        let visible_tabs = self.visible_tabs();
+        let on_screen = self.tabs.iter().enumerate().any(|(index, tab)| {
+            let shown = self.sidebar.visible || visible_tabs.contains(&index);
+            shown
+                && tab.root.panes().iter().any(|id| {
+                    self.panes.get(id).and_then(|pane| pane.agent.as_ref()).is_some_and(|s| spins(s.state))
+                })
+        });
+        if !on_screen {
+            return None;
+        }
+        if self.spinner_frame() != self.spinner_shown {
+            self.redraw();
+        }
+        let step = crate::icons::SPINNER_FRAME_TIME.as_millis();
+        let next = (self.launched.elapsed().as_millis() / step + 1) * step;
+        Some(self.launched + Duration::from_millis(next as u64))
+    }
+
     fn hooks_notice(&self) -> Option<String> {
         if self.claude_hooks || self.hooks_declined {
             return None;
@@ -789,4 +827,9 @@ fn run_detached(program: &str, args: &[&str]) {
         }
         Err(e) => log::warn!("cannot run {program}: {e}"),
     }
+}
+
+/// An agent shows a spinner while it is busy.
+pub(super) fn spins(state: AgentState) -> bool {
+    matches!(state, AgentState::Working | AgentState::WaitingOnSubagents)
 }
