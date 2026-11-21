@@ -500,7 +500,7 @@ impl App {
             return;
         }
         let Some(dir) = self.state_dir.clone() else { return };
-        if self.tabs.is_empty() {
+        if self.tabs.iter().all(|tab| tab.start.is_some()) {
             // Everything was closed: next launch starts fresh.
             let _ = std::fs::remove_file(dir.join("session.json"));
             return;

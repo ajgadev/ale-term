@@ -455,18 +455,19 @@ impl App {
         self.relayout();
     }
 
-    /// Closes a pane, and its tab when it was the tab's last pane. Returns
-    /// true when no tabs are left and the app should quit.
-    fn close_pane(&mut self, id: PaneId) -> bool {
+    /// Closes a pane, and its tab when it was the tab's last pane. When no
+    /// tabs are left, a start page takes their place: the app keeps
+    /// running until it is quit.
+    fn close_pane(&mut self, id: PaneId) {
+        // Where the next session should start if this was the last one.
+        let directory = self.panes.get(&id).and_then(|pane| pane.terminal.working_directory());
         // An agent still running here ends with the pane.
         self.archive_agent(id);
         self.panes.remove(&id);
         if let Some(renderer) = &mut self.renderer {
             renderer.retain_images(|key| key >> 32 != id);
         }
-        let Some(index) = self.tabs.iter().position(|tab| tab.root.panes().contains(&id)) else {
-            return self.tabs.is_empty();
-        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.root.panes().contains(&id)) else { return };
         let tab = &mut self.tabs[index];
         let root = std::mem::replace(&mut tab.root, Node::Leaf(id));
         match root.remove(id) {
@@ -481,17 +482,22 @@ impl App {
                 self.after_tab_removed(index, removed.workspace, index == self.active);
             }
         }
+        if self.tabs.is_empty() {
+            self.open_start_page_in(directory);
+        }
         self.relayout();
-        self.tabs.is_empty()
     }
 
-    fn close_tab(&mut self, index: usize) -> bool {
-        let Some(tab) = self.tabs.get(index) else { return false };
-        let mut done = false;
-        for id in tab.root.panes() {
-            done = self.close_pane(id);
+    fn close_tab(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        // The last tab showing a start page stays: closing it would only
+        // open another.
+        if self.tabs.len() == 1 && tab.start.is_some() {
+            return;
         }
-        done
+        for id in tab.root.panes() {
+            self.close_pane(id);
+        }
     }
 
     /// Shows the tab at position `index` of the tab bar.
@@ -611,17 +617,14 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(None),
             Action::ClosePane => {
-                if let Some(id) = self.focused_pane_id()
-                    && self.close_pane(id)
-                {
-                    event_loop.exit();
+                // A start page has no pane of its own: close its tab.
+                if self.start_page().is_some() {
+                    self.close_tab(self.active);
+                } else if let Some(id) = self.focused_pane_id() {
+                    self.close_pane(id);
                 }
             }
-            Action::CloseTab => {
-                if self.close_tab(self.active) {
-                    event_loop.exit();
-                }
-            }
+            Action::CloseTab => self.close_tab(self.active),
             Action::RenameTab => {
                 let query = self.tabs.get(self.active).and_then(|t| t.custom_title.clone()).unwrap_or_default();
                 self.overlay = Overlay::Input { kind: InputKind::RenameTab, query };
@@ -769,7 +772,7 @@ impl App {
 
     // ---- Terminal events --------------------------------------------------
 
-    fn term_event(&mut self, id: PaneId, event: TermEvent, event_loop: &ActiveEventLoop) {
+    fn term_event(&mut self, id: PaneId, event: TermEvent) {
         match event {
             TermEvent::Wakeup => {
                 self.agent_output(id);
@@ -789,8 +792,8 @@ impl App {
                 }
             }
             TermEvent::Exit => {
-                if self.panes.contains_key(&id) && self.close_pane(id) {
-                    event_loop.exit();
+                if self.panes.contains_key(&id) {
+                    self.close_pane(id);
                 }
             }
             TermEvent::ClipboardStore(text) => set_clipboard(text),
@@ -934,9 +937,9 @@ impl ApplicationHandler<UserEvent> for App {
         });
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Term(id, event) => self.term_event(id, event, event_loop),
+            UserEvent::Term(id, event) => self.term_event(id, event),
             UserEvent::ConfigChanged => self.reload_config(),
             UserEvent::Agent(message) => self.hook_message(message),
         }

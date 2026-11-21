@@ -88,6 +88,7 @@ and in the sidebar.
 a page asking what to build. Type a task and press Enter to start the
 selected agent on it; Tab switches agent; Cmd+Enter, or "or open a
 terminal", gives a plain shell instead. Nothing runs until you choose.
+Closing the last tab brings this page back instead of quitting; Cmd+Q quits.
 
 How the status is known:
 

@@ -156,18 +156,9 @@ impl App {
         if let Some(hit) = self.tab_bar().hit(x, y) {
             match (hit, mouse_button) {
                 (TabBarHit::Tab(index), MouseButton::Left) => self.select_tab(index),
-                (TabBarHit::Close(index), MouseButton::Left) => {
-                    if let Some(&tab) = self.visible_tabs().get(index)
-                        && self.close_tab(tab)
-                    {
-                        event_loop.exit();
-                    }
-                }
-                (TabBarHit::Tab(index), MouseButton::Middle) => {
-                    if let Some(&tab) = self.visible_tabs().get(index)
-                        && self.close_tab(tab)
-                    {
-                        event_loop.exit();
+                (TabBarHit::Close(index), MouseButton::Left) | (TabBarHit::Tab(index), MouseButton::Middle) => {
+                    if let Some(&tab) = self.visible_tabs().get(index) {
+                        self.close_tab(tab);
                     }
                 }
                 (TabBarHit::Workspace, MouseButton::Left) => self.open_list(ListKind::Workspaces),

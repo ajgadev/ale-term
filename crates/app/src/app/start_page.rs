@@ -7,7 +7,7 @@ use super::*;
 use crate::start::{self, Hit, StartPage};
 
 impl App {
-    fn start_page(&self) -> Option<&StartPage> {
+    pub(super) fn start_page(&self) -> Option<&StartPage> {
         self.tabs.get(self.active)?.start.as_ref()
     }
 
@@ -18,8 +18,14 @@ impl App {
     /// Opens a new tab showing the start page. Nothing is started until
     /// the user chooses what to run.
     pub(super) fn open_start_page(&mut self) {
-        let directory = self
-            .inherited_directory()
+        self.open_start_page_in(None);
+    }
+
+    /// Opens a start page for `directory`, or for the current folder.
+    pub(super) fn open_start_page_in(&mut self, directory: Option<PathBuf>) {
+        let directory = directory
+            .filter(|directory| directory.is_dir())
+            .or_else(|| self.inherited_directory())
             .or_else(|| self.workspace(self.active_ws).and_then(|workspace| workspace.root.clone()))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
@@ -100,7 +106,8 @@ impl App {
                     }
                 }
             }
-            // Esc closes the page, unless it is the only tab.
+            // Esc closes the page, unless it is the only tab (closing the
+            // last tab would only bring the page back).
             Key::Named(NamedKey::Escape) => {
                 if self.tabs.len() > 1 {
                     self.close_tab(self.active);
