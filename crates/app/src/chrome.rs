@@ -38,6 +38,8 @@ pub struct TabBar {
     /// The switch between the sidebar and board layouts, at the right end:
     /// one half for each.
     pub switch: [Rect; 2],
+    /// The button that opens the command menu, left of the switch.
+    pub commands: Rect,
 }
 
 /// The layout each half of the switch stands for.
@@ -79,6 +81,8 @@ pub enum TabBarHit {
     Workspace,
     /// One half of the layout switch.
     Layout(AgentLayout),
+    /// The button that opens the command menu.
+    Commands,
     /// Empty space, used for dragging the window.
     Empty,
 }
@@ -112,7 +116,8 @@ impl TabBar {
         let segment = (SWITCH_SEGMENT * scale).round();
         let switch_x = window_width - inset - segment * 2.0;
         let switch = [0.0, 1.0].map(|i| Rect::new(switch_x + i * segment, top + inset, segment, height - inset * 2.0));
-        let available = (switch_x - inset - left - button).max(0.0);
+        let commands = Rect::new(switch_x - inset - segment, top + inset, segment, height - inset * 2.0);
+        let available = (commands.x - inset - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
 
         let tabs: Vec<Rect> = (0..tab_count)
@@ -138,6 +143,7 @@ impl TabBar {
             close,
             new_tab: Rect::new(left + tab_count as f32 * width, top, button, height),
             switch,
+            commands,
         }
     }
 
@@ -151,6 +157,9 @@ impl TabBar {
         }
         if let Some(index) = self.switch.iter().position(|half| half.contains(x, y)) {
             return Some(TabBarHit::Layout(SWITCH_LAYOUTS[index]));
+        }
+        if self.commands.contains(x, y) {
+            return Some(TabBarHit::Commands);
         }
         if let Some(index) = self.close.iter().position(|close| close.contains(x, y)) {
             return Some(TabBarHit::Close(index));
@@ -288,6 +297,17 @@ impl TabBar {
         r.text("+", false, plus_x, text_y, self.new_tab.w, color(palette.chrome_text_dim));
 
         self.draw_switch(r, layout, hovered, scale, palette);
+        // The command menu's button: the Command key's sign, framed.
+        let commands = self.commands;
+        let over = hovered == Some(TabBarHit::Commands);
+        outline(r, commands, line, color(palette.border));
+        if over {
+            r.rect(commands.x + line, commands.y + line, commands.w - line * 2.0, commands.h - line * 2.0, color(palette.border));
+        }
+        let glyph_x = commands.x + ((commands.w - metrics.width) / 2.0).round();
+        let glyph_y = commands.y + ((commands.h - metrics.height) / 2.0).round();
+        let ink = if over { palette.foreground } else { palette.chrome_text_dim };
+        r.text("⌘", false, glyph_x, glyph_y, commands.w, color(ink));
         scrolling
     }
 
@@ -408,7 +428,7 @@ mod tests {
         assert_eq!(crowded.hit(first.x + first.w - 2.0, 10.0), Some(TabBarHit::Tab(0)));
         assert_eq!(bar.hit(500.0, 10.0), Some(TabBarHit::Tab(1)));
         assert_eq!(bar.hit(670.0, 10.0), Some(TabBarHit::NewTab));
-        assert_eq!(bar.hit(900.0, 10.0), Some(TabBarHit::Empty));
+        assert_eq!(bar.hit(800.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(20.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(100.0, 60.0), None);
     }
@@ -418,7 +438,10 @@ mod tests {
         let bar = TabBar::layout(3, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         let [sidebar, board] = bar.switch;
         assert!(board.x + board.w <= 1000.0 && sidebar.x + sidebar.w <= board.x + 0.5);
-        assert!(bar.new_tab.x + bar.new_tab.w <= sidebar.x);
+        assert!(bar.new_tab.x + bar.new_tab.w <= bar.commands.x);
+        // The command menu's button is just left of the switch.
+        assert!(bar.commands.x + bar.commands.w <= sidebar.x);
+        assert_eq!(bar.hit(bar.commands.x + 3.0, 19.0), Some(TabBarHit::Commands));
         assert_eq!(bar.hit(sidebar.x + 3.0, 19.0), Some(TabBarHit::Layout(AgentLayout::Sidebar)));
         assert_eq!(bar.hit(board.x + 3.0, 19.0), Some(TabBarHit::Layout(AgentLayout::Board)));
         // Many tabs never run into it.

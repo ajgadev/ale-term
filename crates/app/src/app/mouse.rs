@@ -217,6 +217,7 @@ impl App {
                 (TabBarHit::Workspace, MouseButton::Left) => self.open_list(ListKind::Workspaces),
                 (TabBarHit::NewTab, MouseButton::Left) => self.new_tab(None),
                 (TabBarHit::Layout(layout), MouseButton::Left) => self.set_layout(layout),
+                (TabBarHit::Commands, MouseButton::Left) => self.perform(Action::CommandPalette, event_loop),
                 (TabBarHit::Empty, MouseButton::Left) => {
                     let clicks = self.register_click();
                     if let Some(window) = &self.window {
@@ -383,7 +384,7 @@ impl App {
         } else {
             self.tab_bar()
                 .hit(x, y)
-                .filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_)))
+                .filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_) | TabBarHit::Commands))
         };
         if hover_tab != self.mouse.hover_tab {
             // Moving between a tab and its close button is the same tab.
