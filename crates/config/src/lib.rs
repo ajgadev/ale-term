@@ -189,10 +189,14 @@ pub struct AgentsConfig {
     pub sidebar_width: f32,
     /// Play a sound when an agent is stuck waiting for you (a permission
     /// prompt, a question, an error). A finished turn is always silent.
+    /// Off by default.
     pub sound: bool,
     /// Show a macOS notification when that happens while the window is not
-    /// in front.
+    /// in front. Off by default.
     pub notifications: bool,
+    /// Bounce the Dock icon when that happens while the window is not in
+    /// front.
+    pub dock_bounce: bool,
     /// The command the "New session" button runs in a new tab.
     pub new_session_command: String,
     /// Where agents are shown: a sidebar, or a board across the top.
@@ -218,8 +222,9 @@ impl Default for AgentsConfig {
         Self {
             sidebar: true,
             sidebar_width: 260.0,
-            sound: true,
-            notifications: true,
+            sound: false,
+            notifications: false,
+            dock_bounce: true,
             new_session_command: "claude".into(),
             layout: AgentLayout::Sidebar,
             board_rows: 2,
@@ -501,8 +506,8 @@ mod tests {
         assert!(updated.starts_with("# My settings.\n"));
 
         // An empty file works; a broken one is reported, not rewritten.
-        let updated = set_in_text("", "agents", "sound", &SettingValue::Bool(false)).unwrap();
-        assert!(!Config::parse(&updated).unwrap().agents.sound);
+        let updated = set_in_text("", "agents", "sound", &SettingValue::Bool(true)).unwrap();
+        assert!(Config::parse(&updated).unwrap().agents.sound);
         assert!(set_in_text("[font\nsize = 1", "font", "size", &SettingValue::Float(2.0)).is_err());
     }
 

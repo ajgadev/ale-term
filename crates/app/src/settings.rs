@@ -58,6 +58,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { section: "agents", key: "sidebar_width", group: "Agents", label: "Sidebar width", kind: number(10.0, 160.0, 600.0), help: "In points." },
     Setting { section: "agents", key: "sound", group: "Agents", label: "Sound", kind: Kind::Toggle, help: "Play a sound when an agent is stuck waiting for you." },
     Setting { section: "agents", key: "notifications", group: "Agents", label: "Notifications", kind: Kind::Toggle, help: "Notify when that happens and the window is not in front." },
+    Setting { section: "agents", key: "dock_bounce", group: "Agents", label: "Dock bounce", kind: Kind::Toggle, help: "Bounce the Dock icon when that happens and the window is not in front." },
     Setting { section: "agents", key: "new_session_command", group: "Agents", label: "New session agent", kind: Kind::Text, help: "The agent command the new-session page (Shift+Cmd+T) starts with." },
     Setting { section: "window", key: "restore", group: "Window", label: "Restore at launch", kind: Kind::Toggle, help: "Reopen the previous workspaces, tabs and splits." },
     Setting { section: "window", key: "renderer", group: "Window", label: "Renderer", kind: Kind::Choice(&["cpu", "gpu"]), help: "\"cpu\" uses the least memory. Takes effect at the next launch." },
@@ -109,6 +110,7 @@ pub fn current(config: &Config, setting: &Setting) -> SettingValue {
         ("agents", "sidebar_width") => Float(config.agents.sidebar_width as f64),
         ("agents", "sound") => Bool(config.agents.sound),
         ("agents", "notifications") => Bool(config.agents.notifications),
+        ("agents", "dock_bounce") => Bool(config.agents.dock_bounce),
         ("agents", "new_session_command") => Text(config.agents.new_session_command.clone()),
         _ => Text(String::new()),
     }

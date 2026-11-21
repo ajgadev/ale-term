@@ -43,10 +43,13 @@ sidebar_width = 260.0
 # Rows of cards the board shows before a column scrolls.
 board_rows = 2
 # Play a sound when an agent is stuck waiting for you (a permission prompt, a
-# question, an error). A finished turn never makes a sound.
-sound = true
+# question, an error). Off by default. A finished turn never makes a sound.
+sound = false
 # Show a macOS notification for the same, when the window is not in front.
-notifications = true
+# Off by default.
+notifications = false
+# Bounce the Dock icon for the same, when the window is not in front.
+dock_bounce = true
 # The agent command the new-session page (Shift+Cmd+T) starts with.
 new_session_command = "claude"
 

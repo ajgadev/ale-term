@@ -218,10 +218,12 @@ dot in the state's color. (The marks are simple shapes in each agent's
 color, not the vendors' logos.) Click a row to jump to that pane.
 
 When an agent is stuck waiting for you (a permission prompt, a question, an
-error) while you are elsewhere, ale-term plays a sound and, if the window is
-not in front, shows a macOS notification. Both can be turned off under
-`[agents]`. A finished turn is never announced; it shows as Done on the tab
-and in the sidebar.
+error) while you are elsewhere, ale-term can play a sound and, if the window
+is not in front, show a macOS notification and bounce its Dock icon. Sound
+and notifications are off by default and the bounce is on; switch each one
+separately in Settings, or with `sound`, `notifications` and `dock_bounce`
+under `[agents]`. A finished turn is never announced;
+it shows as Done on the tab and in the sidebar.
 
 **New session** (Shift+Cmd+T) opens a page asking what to build; the button
 at the top of the sidebar offers that or a plain terminal. Type a task and

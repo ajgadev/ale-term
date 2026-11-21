@@ -387,7 +387,9 @@ impl App {
             run_detached("afplay", &["/System/Library/Sounds/Funk.aiff"]);
         }
         if !self.focused {
-            if let Some(window) = &self.window {
+            if self.config.agents.dock_bounce
+                && let Some(window) = &self.window
+            {
                 window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
             }
             if self.config.agents.notifications {
