@@ -17,6 +17,11 @@ const TAB_MAX_WIDTH: f32 = 240.0;
 const TAB_PADDING: f32 = 14.0;
 const WORKSPACE_MAX_WIDTH: f32 = 220.0;
 const CLOSE_SIZE: f32 = 20.0;
+/// How fast a hovered tab's long title scrolls, in points per second.
+const SCROLL_SPEED: f32 = 36.0;
+/// Seconds a scrolling title rests before it starts, and at its end.
+const SCROLL_START_REST: f32 = 0.5;
+const SCROLL_END_REST: f32 = 1.4;
 /// Width of each half of the layout switch.
 const SWITCH_SEGMENT: f32 = 30.0;
 
@@ -49,6 +54,9 @@ pub struct TabBarView<'a> {
     pub hovered: Option<TabBarHit>,
     /// The layout in use, shown selected in the switch.
     pub layout: AgentLayout,
+    /// Seconds the pointer has been over the hovered tab: a title too long
+    /// for its tab scrolls by, so all of it can be read.
+    pub hover_seconds: f32,
 }
 
 /// What a tab shows.
@@ -164,8 +172,15 @@ impl TabBar {
         format!("{name} ▾")
     }
 
-    pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) {
-        let TabBarView { workspace, titles, active, hovered, layout } = *view;
+    /// Draws the bar. Returns whether a hovered title is scrolling, and so
+    /// needs drawing again shortly.
+    pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) -> bool {
+        let TabBarView { workspace, titles, active, hovered, layout, hover_seconds } = *view;
+        let hovered_tab = match hovered {
+            Some(TabBarHit::Tab(index) | TabBarHit::Close(index)) => Some(index),
+            _ => None,
+        };
+        let mut scrolling = false;
         let metrics = r.metrics();
         let line = scale.round().max(1.0);
         let bar = self.bar;
@@ -227,8 +242,31 @@ impl TabBar {
                 }
                 (None, None) => {}
             }
-            let label = fit(&title.text, max_width, metrics.width);
-            let used = r.text(&label, is_active, x, text_y, max_width, color(text_color));
+            let full_width = r.text_width(&title.text);
+            let used = if hovered_tab == Some(index) && full_width > max_width && max_width > metrics.width * 2.0 {
+                // Too long, and the pointer is on it: slide it along. Only
+                // whole letters are drawn, so the ones at either edge come
+                // and go as they reach it.
+                scrolling = true;
+                let speed = SCROLL_SPEED * scale;
+                let offset = scroll_offset(hover_seconds, full_width - max_width, speed);
+                let mut start = 0.0;
+                let mut skip = 0;
+                for c in title.text.chars() {
+                    if start >= offset {
+                        break;
+                    }
+                    start += r.text_width(c.encode_utf8(&mut [0; 4]));
+                    skip += 1;
+                }
+                let shown: String = title.text.chars().skip(skip).collect();
+                let shift = start - offset;
+                r.text(&shown, is_active, x + shift, text_y, max_width - shift, color(text_color));
+                max_width
+            } else {
+                let label = fit(&title.text, max_width, metrics.width);
+                r.text(&label, is_active, x, text_y, max_width, color(text_color))
+            };
             // What the agent is doing, in the space that is left.
             if let Some(detail) = &title.detail {
                 let room = max_width - used - metrics.width * 2.0;
@@ -259,6 +297,7 @@ impl TabBar {
         r.text("+", false, plus_x, text_y, self.new_tab.w, color(palette.chrome_text_dim));
 
         self.draw_switch(r, layout, hovered, scale, palette);
+        scrolling
     }
 
     /// The layout switch: a small picture of each layout, the one in use
@@ -307,6 +346,18 @@ fn outline(r: &mut Renderer, rect: Rect, line: f32, ink: ale_render::Color) {
     r.rect(rect.x, rect.y + rect.h - line, rect.w, line, ink);
     r.rect(rect.x, rect.y, line, rect.h, ink);
     r.rect(rect.x + rect.w - line, rect.y, line, rect.h, ink);
+}
+
+/// How far a title `overflow` pixels too long has scrolled after the pointer
+/// rested on it for `seconds`: a pause, a steady slide until its end shows,
+/// another pause, then back to the start and round again.
+pub fn scroll_offset(seconds: f32, overflow: f32, speed: f32) -> f32 {
+    if overflow <= 0.0 || speed <= 0.0 {
+        return 0.0;
+    }
+    let cycle = SCROLL_START_REST + overflow / speed + SCROLL_END_REST;
+    let t = seconds.max(0.0) % cycle;
+    ((t - SCROLL_START_REST) * speed).clamp(0.0, overflow)
 }
 
 /// Shortens `text` with an ellipsis so it fits in `max_width` pixels.
@@ -396,6 +447,20 @@ mod tests {
         assert_eq!(bar.hit(bar.tabs[1].x + 5.0, 210.0), Some(TabBarHit::Tab(1)));
         let close = bar.close[0];
         assert_eq!(bar.hit(close.x + 2.0, close.y + 2.0), Some(TabBarHit::Close(0)));
+    }
+
+    #[test]
+    fn hovered_titles_scroll_to_their_end_and_back() {
+        // 100 pixels too long at 50 pixels a second.
+        let at = |seconds| scroll_offset(seconds, 100.0, 50.0);
+        assert_eq!(at(0.0), 0.0);
+        assert_eq!(at(SCROLL_START_REST), 0.0);
+        assert_eq!(at(SCROLL_START_REST + 1.0), 50.0);
+        // The end rests in view, then it starts over.
+        assert_eq!(at(SCROLL_START_REST + 2.0), 100.0);
+        assert_eq!(at(SCROLL_START_REST + 2.0 + SCROLL_END_REST - 0.01), 100.0);
+        assert_eq!(at(SCROLL_START_REST + 2.0 + SCROLL_END_REST + 0.1), 0.0);
+        assert_eq!(scroll_offset(3.0, 0.0, 50.0), 0.0);
     }
 
     #[test]

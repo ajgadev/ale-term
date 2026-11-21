@@ -239,8 +239,9 @@ impl App {
             active: active_position,
             hovered: self.mouse.hover_tab,
             layout: self.config.agents.layout,
+            hover_seconds: self.mouse.hover_tab_since.elapsed().as_secs_f32(),
         };
-        tab_bar.draw(renderer, &view, scale, palette);
+        self.tab_scrolling = tab_bar.draw(renderer, &view, scale, palette);
         if let Some((rect, model)) = &graph {
             crate::graph::draw(renderer, model, *rect, scale, palette);
         }
@@ -280,6 +281,20 @@ impl App {
             }
             Overlay::None => {}
         }
+    }
+
+    /// While a hovered tab's title is scrolling, redraws about 30 times a
+    /// second. Returns when the next frame is due.
+    pub(super) fn tick_tab_scroll(&mut self) -> Option<Instant> {
+        let hovering = matches!(self.mouse.hover_tab, Some(TabBarHit::Tab(_) | TabBarHit::Close(_)));
+        if !(self.tab_scrolling && hovering && self.focused) {
+            return None;
+        }
+        let due = self.last_frame + Duration::from_millis(33);
+        if Instant::now() >= due {
+            self.redraw();
+        }
+        Some(due)
     }
 
     pub(super) fn draw(&mut self) {

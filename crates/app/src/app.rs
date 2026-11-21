@@ -119,6 +119,9 @@ struct Mouse {
     /// The part of the tab bar under the pointer, for showing a tab's
     /// close button.
     hover_tab: Option<TabBarHit>,
+    /// When the pointer came onto the tab it is over, for scrolling a long
+    /// title.
+    hover_tab_since: Instant,
     /// The pointer shape last set, so it is only changed when needed.
     cursor: CursorIcon,
     /// A pane whose program was last sent a drag across cells: a program
@@ -202,6 +205,8 @@ pub struct App {
     /// When the process started, to report time to first frame.
     launched: Instant,
     first_frame_logged: bool,
+    /// The last frame showed a hovered tab's title scrolling.
+    tab_scrolling: bool,
 }
 
 impl App {
@@ -254,6 +259,7 @@ impl App {
                 click_count: 0,
                 last_cell: None,
                 hover_tab: None,
+                hover_tab_since: Instant::now(),
                 cursor: CursorIcon::Default,
                 program_selection: None,
             },
@@ -264,6 +270,7 @@ impl App {
             snapshot_at: None,
             launched: Instant::now(),
             first_frame_logged: false,
+            tab_scrolling: false,
         }
     }
 
@@ -1078,6 +1085,9 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(at) = self.tick_spinner() {
             wake_at(at);
         }
+        if let Some(at) = self.tick_tab_scroll() {
+            wake_at(at);
+        }
 
         // Test hook: run scripted steps shortly before the snapshot.
         if let Some(at) = self.snapshot_at
@@ -1097,6 +1107,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.start_launch(false);
                 } else if step == "start:agents" {
                     self.open_agent_menu();
+                } else if let Some(hover) = step.strip_prefix("hover-tab:") {
+                    // "hover-tab:1:2.5": the pointer has rested on the
+                    // second tab for two and a half seconds.
+                    let mut parts = hover.split(':');
+                    let index = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                    let seconds = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0.0);
+                    self.mouse.hover_tab = Some(TabBarHit::Tab(index));
+                    self.mouse.hover_tab_since = Instant::now() - Duration::from_secs_f32(seconds);
                 } else if step == "demo:agents" {
                     self.demo_agents();
                 } else if step == "sidebar:new" {

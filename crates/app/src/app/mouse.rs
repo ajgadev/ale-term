@@ -331,6 +331,14 @@ impl App {
                 .filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_) | TabBarHit::Layout(_)))
         };
         if hover_tab != self.mouse.hover_tab {
+            // Moving between a tab and its close button is the same tab.
+            let tab_of = |hit: Option<TabBarHit>| match hit {
+                Some(TabBarHit::Tab(index) | TabBarHit::Close(index)) => Some(index),
+                _ => None,
+            };
+            if tab_of(hover_tab) != tab_of(self.mouse.hover_tab) {
+                self.mouse.hover_tab_since = Instant::now();
+            }
             self.mouse.hover_tab = hover_tab;
             self.redraw();
         }
