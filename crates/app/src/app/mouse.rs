@@ -117,6 +117,14 @@ impl App {
         // A click anywhere else ends a sidebar search.
         self.sidebar.searching = false;
 
+        // Agent graph panel: clicking a node selects it.
+        if self.graph_rect().is_some_and(|rect| rect.contains(x, y)) {
+            if mouse_button == MouseButton::Left {
+                self.graph_click(x, y);
+            }
+            return;
+        }
+
         // Tab bar.
         if let Some(hit) = self.tab_bar().hit(x, y) {
             match (hit, mouse_button) {
@@ -249,7 +257,8 @@ impl App {
 
         // Show what a click would do.
         let over_sidebar = self.sidebar_rect().is_some_and(|rect| rect.contains(x, y));
-        let icon = if over_sidebar || self.tab_bar().bar.contains(x, y) || self.overlay.is_modal() {
+        let over_graph = self.graph_rect().is_some_and(|rect| rect.contains(x, y));
+        let icon = if over_sidebar || over_graph || self.tab_bar().bar.contains(x, y) || self.overlay.is_modal() {
             CursorIcon::Default
         } else if self.hover_link.is_some() {
             CursorIcon::Pointer

@@ -110,12 +110,17 @@ impl App {
         let Some(session) = pane.agent.as_mut() else { return };
         let change = hooks::apply(session, &message.event, &message.payload, now);
         log::debug!(
-            "hook {} {:?} -> {:?} (state {:?}, activity {:?})",
+            "hook {} {:?} -> {:?} (state {:?}, activity {:?}, subagents {:?})",
             message.agent,
             message.payload["hook_event_name"].as_str().unwrap_or(&message.event),
             change,
             session.state,
             session.activity,
+            session
+                .subagents
+                .iter()
+                .map(|s| (s.kind.as_str(), s.description.as_str(), s.activity.as_deref(), s.finished.is_some()))
+                .collect::<Vec<_>>(),
         );
         if change == Change::Ended {
             if pane.terminal.shell().integrated {
@@ -458,7 +463,7 @@ impl App {
         reported.or_else(from_terminal).unwrap_or_else(|| session.kind.name().to_owned())
     }
 
-    fn agent_status(session: &Session) -> String {
+    pub(super) fn agent_status(session: &Session) -> String {
         let label = session.state.label();
         match (session.state, &session.activity) {
             (AgentState::Working | AgentState::NeedsYou | AgentState::WaitingOnSubagents, Some(activity)) => {
@@ -526,13 +531,18 @@ impl App {
                     elapsed: sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
                     current,
                 }];
-                for subagent in &session.subagents {
+                for (index, subagent) in session.subagents.iter().enumerate() {
+                    // Running ones, and those that finished a moment ago.
+                    let recent = subagent.finished.is_none_or(|at| now.duration_since(at) < Duration::from_secs(20));
+                    if !recent {
+                        continue;
+                    }
                     let text = if subagent.description.is_empty() {
                         subagent.kind.clone()
                     } else {
                         format!("{}: {}", subagent.kind, subagent.description)
                     };
-                    group.push(Row::Subagent { target, text, running: subagent.finished.is_none() });
+                    group.push(Row::Subagent { target, index, text, running: subagent.finished.is_none() });
                 }
                 rows.push((tab.workspace, Some(session.state), group));
             }
@@ -593,7 +603,15 @@ impl App {
     pub(super) fn sidebar_click(&mut self, hit: Hit) {
         self.sidebar.searching = false;
         match hit {
-            Hit::Row(target) => self.go_to(target),
+            Hit::Row(target) => {
+                self.go_to(target);
+                // Show the agent's graph when it has subagents or tasks.
+                self.reveal_graph(target.pane, None);
+            }
+            Hit::Subagent(target, index) => {
+                self.go_to(target);
+                self.reveal_graph(target.pane, Some(index));
+            }
             Hit::Filter(filter) => {
                 self.sidebar.filter = filter;
                 self.sidebar.scroll = 0.0;

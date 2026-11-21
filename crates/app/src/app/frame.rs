@@ -113,6 +113,9 @@ impl App {
     /// Describes the whole window to the renderer.
     pub(super) fn build_frame(&mut self) {
         self.refresh_fallback_titles();
+        // The graph panel takes space from the terminals when it shows.
+        self.sync_graph_layout();
+        let graph = self.graph_rect().and_then(|rect| Some((rect, self.graph_model()?)));
         let layout = self.active_layout();
         let tab_bar = self.tab_bar();
         let visible = self.visible_tabs();
@@ -193,6 +196,9 @@ impl App {
             renderer.rect(x, y, w, h, color(palette.border));
         }
         tab_bar.draw(renderer, &workspace_name, &titles, active_position, scale, palette);
+        if let Some((rect, model)) = &graph {
+            crate::graph::draw(renderer, model, *rect, scale, palette);
+        }
         if let Some((rect, model, scroll)) = &sidebar {
             crate::sidebar::draw(renderer, model, *rect, scale, *scroll, palette);
         }

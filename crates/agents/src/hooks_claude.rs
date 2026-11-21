@@ -25,6 +25,7 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
             session.set_state(AgentState::Idle, now)
         }
         "UserPromptSubmit" => {
+            session.new_turn();
             if let Some(prompt) = text(payload, &["prompt"]) {
                 // The first line of the first prompt names the task until
                 // the agent provides a better title.
@@ -34,13 +35,26 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
             session.set_state(AgentState::Working, now)
         }
         "PreToolUse" => {
-            session.set_activity(describe_tool(payload));
-            // Inside a subagent the event carries its id; the main agent's
-            // own state is not affected by what a subagent does.
-            if payload.get("agent_id").is_some_and(|id| !id.is_null()) {
-                return Change::Updated;
+            // Inside a subagent the event carries that subagent's id.
+            let caller = text(payload, &["agent_id"]);
+            // A request to launch a subagent: remember who asked and what
+            // for, since the start report that follows says neither.
+            if matches!(payload["tool_name"].as_str(), Some("Agent" | "Task")) {
+                let description = payload["tool_input"]["description"].as_str().unwrap_or("");
+                session.launch_requested(caller.clone(), description);
             }
-            session.set_state(AgentState::Working, now)
+            match caller {
+                // What a subagent does is its own activity; the main
+                // agent's state is not affected.
+                Some(id) => {
+                    session.subagent_activity(&id, describe_tool(payload));
+                    Change::Updated
+                }
+                None => {
+                    session.set_activity(describe_tool(payload));
+                    session.set_state(AgentState::Working, now)
+                }
+            }
         }
         "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" | "PermissionDenied" | "ElicitationResult" => {
             if payload.get("agent_id").is_some_and(|id| !id.is_null()) {
@@ -65,16 +79,19 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
         "SubagentStart" => {
             let id = text(payload, &["agent_id"]).unwrap_or_default();
             let kind = text(payload, &["agent_type"]).unwrap_or_else(|| "subagent".into());
-            let description = text(payload, &["description", "prompt"]).unwrap_or_default();
             if !id.is_empty() {
-                session.subagent_started(&id, &kind, &description, now);
+                session.subagent_started(&id, &kind, now);
             }
             Change::Updated
         }
         "SubagentStop" => {
             if let Some(id) = text(payload, &["agent_id"]) {
-                session.subagent_finished(&id, now);
+                if let Some(path) = text(payload, &["agent_transcript_path"]) {
+                    session.subagent_transcript_reported(&id, &path);
+                }
+                session.subagent_finished(&id, text(payload, &["last_assistant_message"]), now);
             }
+            session.note_background_tasks(payload);
             // The main agent had stopped and was only waiting for these.
             if session.state == AgentState::WaitingOnSubagents && session.running_subagents() == 0 {
                 return session.set_state(AgentState::Done, now);
@@ -82,6 +99,7 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
             Change::Updated
         }
         "Stop" => {
+            session.note_background_tasks(payload);
             if session.running_subagents() > 0 {
                 session.set_activity(format!("{} subagents still running", session.running_subagents()));
                 session.set_state(AgentState::WaitingOnSubagents, now)
@@ -127,8 +145,11 @@ fn notification(session: &mut Session, payload: &Value, now: Instant) -> Change 
 /// A short description of a tool call, e.g. "Editing src/main.rs".
 fn describe_tool(payload: &Value) -> String {
     let tool = payload["tool_name"].as_str().unwrap_or("tool");
-    let input = &payload["tool_input"];
-    let cwd = payload["cwd"].as_str();
+    describe(tool, &payload["tool_input"], payload["cwd"].as_str())
+}
+
+/// A short description of a call to `tool` with `input`.
+pub(crate) fn describe(tool: &str, input: &Value, cwd: Option<&str>) -> String {
     let field = |key: &str| input[key].as_str().unwrap_or("");
     let path = |key: &str| short_path(field(key), cwd);
     match tool {
@@ -219,15 +240,32 @@ mod tests {
     fn subagents_are_tracked_and_hold_the_session_open() {
         let (mut s, now) = session();
         apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "audit" }), now);
-        let start = |id: &str| json!({ "agent_id": id, "agent_type": "Explore", "description": "look around" });
+        // The real sequence: the launch request names the task, the start
+        // report names the subagent.
+        let launch = |what: &str| json!({ "tool_name": "Agent", "tool_input": { "description": what } });
+        let start = |id: &str| json!({ "agent_id": id, "agent_type": "Explore" });
+        apply(&mut s, "PreToolUse", &launch("look around"), now);
         apply(&mut s, "SubagentStart", &start("a1"), now);
+        apply(&mut s, "PreToolUse", &launch("check the tests"), now);
         apply(&mut s, "SubagentStart", &start("a2"), now);
         assert_eq!(s.running_subagents(), 2);
-        assert_eq!(s.subagents[0].kind, "Explore");
+        assert_eq!((s.subagents[0].kind.as_str(), s.subagents[0].description.as_str()), ("Explore", "look around"));
+        assert_eq!(s.subagents[1].description, "check the tests");
+        assert_eq!(s.activity.as_deref(), Some("Delegating: check the tests"));
 
-        // A subagent's own tool calls do not change the main state.
+        // A subagent's own tool calls are its activity, not the main one's.
         let inner = json!({ "agent_id": "a1", "tool_name": "Read", "tool_input": { "file_path": "/x/y.rs" } });
         assert_eq!(apply(&mut s, "PreToolUse", &inner, now), Change::Updated);
+        assert_eq!(s.subagents[0].activity.as_deref(), Some("Reading x/y.rs"));
+        assert_eq!(s.activity.as_deref(), Some("Delegating: check the tests"));
+
+        // A subagent launching one of its own becomes its parent.
+        let nested = json!({ "agent_id": "a1", "tool_name": "Agent", "tool_input": { "description": "dig deeper" } });
+        apply(&mut s, "PreToolUse", &nested, now);
+        apply(&mut s, "SubagentStart", &start("a3"), now);
+        assert_eq!(s.subagents[2].parent.as_deref(), Some("a1"));
+        apply(&mut s, "SubagentStop", &json!({ "agent_id": "a3", "last_assistant_message": "found it" }), now);
+        assert_eq!(s.subagents[2].result.as_deref(), Some("found it"));
 
         assert_eq!(apply(&mut s, "Stop", &json!({}), now), Change::State(AgentState::WaitingOnSubagents));
         apply(&mut s, "SubagentStop", &json!({ "agent_id": "a1" }), now);

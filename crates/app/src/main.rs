@@ -13,6 +13,7 @@ mod board;
 mod boxdraw;
 mod chrome;
 mod draw;
+mod graph;
 mod input;
 mod layout;
 mod links;

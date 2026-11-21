@@ -7,6 +7,7 @@
 //! bell means "needs you". Once a session has received any hook message the
 //! guesswork is switched off for it.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -133,8 +134,24 @@ pub struct Subagent {
     pub kind: String,
     /// What it was asked to do, when known.
     pub description: String,
+    /// The subagent that started it; `None` when the main agent did.
+    pub parent: Option<String>,
+    /// What it is doing right now, e.g. "Reading src/lib.rs".
+    pub activity: Option<String>,
+    /// Its final answer, once it has finished.
+    pub result: Option<String>,
+    /// Where its conversation is recorded.
+    pub transcript: Option<PathBuf>,
     pub started: Instant,
     pub finished: Option<Instant>,
+}
+
+/// Something the agent left running in the background (a dev server, a
+/// long test run).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundTask {
+    pub id: String,
+    pub label: String,
 }
 
 /// What happened to a session as the result of an update.
@@ -165,6 +182,11 @@ pub struct Session {
     pub transcript: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
     pub subagents: Vec<Subagent>,
+    pub background_tasks: Vec<BackgroundTask>,
+    /// Subagent launches that have been requested but not yet reported as
+    /// started: who asked, and for what. The start report itself carries
+    /// neither, so they are matched up in order.
+    pending_launches: VecDeque<(Option<String>, String)>,
     /// True once a hook message has arrived: the state is then reported,
     /// not guessed.
     pub hooked: bool,
@@ -176,8 +198,8 @@ pub struct Session {
 const QUIET_AFTER: Duration = Duration::from_millis(2500);
 /// Output this soon after a key press is just the key being echoed.
 const ECHO_WINDOW: Duration = Duration::from_millis(400);
-/// How long a finished subagent stays listed.
-const KEEP_FINISHED: Duration = Duration::from_secs(20);
+/// Most subagents remembered per session; the oldest finished ones go first.
+const MAX_SUBAGENTS: usize = 64;
 
 impl Session {
     pub fn new(kind: AgentKind, now: Instant) -> Session {
@@ -192,6 +214,8 @@ impl Session {
             transcript: None,
             cwd: None,
             subagents: Vec::new(),
+            background_tasks: Vec::new(),
+            pending_launches: VecDeque::new(),
             hooked: false,
             last_output: None,
             last_input: None,
@@ -254,11 +278,8 @@ impl Session {
     /// Call periodically. Returns what changed, and when to call again (if
     /// there is anything to wait for).
     pub fn tick(&mut self, now: Instant) -> (Change, Option<Instant>) {
-        let before = self.subagents.len();
-        self.subagents
-            .retain(|s| s.finished.is_none_or(|finished| now.duration_since(finished) < KEEP_FINISHED));
-        let mut change = if self.subagents.len() != before { Change::Updated } else { Change::None };
-        let mut next = self.subagents.iter().filter_map(|s| s.finished).map(|f| f + KEEP_FINISHED).min();
+        let mut change = Change::None;
+        let mut next: Option<Instant> = None;
 
         if !self.hooked
             && self.state == AgentState::Working
@@ -306,23 +327,96 @@ impl Session {
         }
     }
 
-    pub(crate) fn subagent_started(&mut self, id: &str, kind: &str, description: &str, now: Instant) {
+    /// A new turn begins: what the previous turn's subagents did is no
+    /// longer current.
+    pub(crate) fn new_turn(&mut self) {
+        self.subagents.retain(|subagent| subagent.finished.is_none());
+        self.pending_launches.clear();
+    }
+
+    /// Someone (the main agent, or the subagent `parent`) asked for a
+    /// subagent to be launched.
+    pub(crate) fn launch_requested(&mut self, parent: Option<String>, description: &str) {
+        self.pending_launches.push_back((parent, clean(description, 120)));
+        self.pending_launches.truncate(16);
+    }
+
+    pub(crate) fn subagent_started(&mut self, id: &str, kind: &str, now: Instant) {
         if self.subagents.iter().any(|subagent| subagent.id == id) {
             return;
         }
+        let (parent, description) = self.pending_launches.pop_front().unwrap_or_default();
+        // Only accept a parent we actually know about.
+        let parent = parent.filter(|parent| self.subagents.iter().any(|s| &s.id == parent));
+        // While it runs, its conversation is recorded next to the main one.
+        let transcript = self.subagent_transcript(id);
         self.subagents.push(Subagent {
             id: clean(id, 80),
             kind: clean(kind, 40),
-            description: clean(description, 120),
+            description,
+            parent,
+            activity: None,
+            result: None,
+            transcript,
             started: now,
             finished: None,
         });
+        if self.subagents.len() > MAX_SUBAGENTS
+            && let Some(oldest) = self.subagents.iter().position(|s| s.finished.is_some())
+        {
+            self.subagents.remove(oldest);
+        }
     }
 
-    pub(crate) fn subagent_finished(&mut self, id: &str, now: Instant) {
+    /// Where Claude Code records a subagent's conversation: in a folder
+    /// named after the main transcript, `<session>/subagents/agent-<id>.jsonl`.
+    fn subagent_transcript(&self, id: &str) -> Option<PathBuf> {
+        let safe = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let main = self.transcript.as_ref()?;
+        safe.then(|| main.with_extension("").join("subagents").join(format!("agent-{id}.jsonl")))
+    }
+
+    pub(crate) fn subagent_activity(&mut self, id: &str, activity: String) {
+        if let Some(subagent) = self.subagents.iter_mut().find(|subagent| subagent.id == id) {
+            subagent.activity = Some(clean(&activity, 120));
+        }
+    }
+
+    /// Records where a subagent's conversation is kept, as reported by the
+    /// agent itself. This replaces the location we worked out.
+    pub(crate) fn subagent_transcript_reported(&mut self, id: &str, path: &str) {
+        if let Some(subagent) = self.subagents.iter_mut().find(|subagent| subagent.id == id) {
+            let reported = PathBuf::from(path);
+            if subagent.transcript.as_ref() != Some(&reported) {
+                log::debug!("subagent transcript: expected {:?}, agent reports {reported:?}", subagent.transcript);
+            }
+            subagent.transcript = Some(reported);
+        }
+    }
+
+    pub(crate) fn subagent_finished(&mut self, id: &str, result: Option<String>, now: Instant) {
         if let Some(subagent) = self.subagents.iter_mut().find(|subagent| subagent.id == id) {
             subagent.finished.get_or_insert(now);
+            subagent.activity = None;
+            subagent.result = result.map(|text| clean(&text, 200));
         }
+    }
+
+    /// Replaces the list of background tasks from a hook's report. The
+    /// entries' exact shape is not documented, so the likely fields are
+    /// tried and anything unrecognizable is skipped.
+    pub(crate) fn note_background_tasks(&mut self, payload: &Value) {
+        let Some(tasks) = payload.get("background_tasks").and_then(Value::as_array) else { return };
+        self.background_tasks = tasks
+            .iter()
+            .filter_map(|task| {
+                let label = text(task, &["description", "command", "name", "title", "summary"])
+                    .or_else(|| task.as_str().map(str::to_owned))?;
+                let id = text(task, &["id", "task_id", "shell_id", "bash_id"]).unwrap_or_else(|| label.clone());
+                Some(BackgroundTask { id: clean(&id, 80), label: clean(&label, 120) })
+            })
+            .take(32)
+            .collect();
     }
 }
 
@@ -467,18 +561,70 @@ mod tests {
     }
 
     #[test]
-    fn finished_subagents_linger_briefly() {
+    fn subagents_pick_up_who_launched_them_and_why() {
         let start = Instant::now();
         let mut session = Session::new(AgentKind::Claude, start);
-        session.subagent_started("a1", "Explore", "find the bug", start);
-        session.subagent_started("a1", "Explore", "duplicate", start);
-        assert_eq!(session.running_subagents(), 1);
-        session.subagent_finished("a1", start + Duration::from_secs(5));
-        assert_eq!(session.running_subagents(), 0);
+        session.transcript = Some("/t/projects/repo/abc.jsonl".into());
+
+        session.launch_requested(None, "find the bug");
+        session.subagent_started("a1", "Explore", start);
+        // The same start reported twice changes nothing.
+        session.subagent_started("a1", "Explore", start);
         assert_eq!(session.subagents.len(), 1);
-        let (change, _) = session.tick(start + Duration::from_secs(5) + KEEP_FINISHED);
-        assert_eq!(change, Change::Updated);
-        assert!(session.subagents.is_empty());
+        let first = &session.subagents[0];
+        assert_eq!((first.description.as_str(), &first.parent), ("find the bug", &None));
+        assert_eq!(first.transcript.as_deref(), Some(std::path::Path::new("/t/projects/repo/abc/subagents/agent-a1.jsonl")));
+
+        // A subagent launching its own subagent.
+        session.launch_requested(Some("a1".into()), "read the logs");
+        session.subagent_started("a2", "general-purpose", start);
+        assert_eq!(session.subagents[1].parent.as_deref(), Some("a1"));
+        // A parent we have never heard of is not believed.
+        session.launch_requested(Some("ghost".into()), "x");
+        session.subagent_started("a3", "Explore", start);
+        assert_eq!(session.subagents[2].parent, None);
+
+        session.subagent_activity("a2", "Reading app.log".into());
+        assert_eq!(session.subagents[1].activity.as_deref(), Some("Reading app.log"));
+        session.subagent_finished("a2", Some("nothing unusual".into()), start + Duration::from_secs(5));
+        assert_eq!(session.running_subagents(), 2);
+        assert_eq!(session.subagents[1].result.as_deref(), Some("nothing unusual"));
+        assert_eq!(session.subagents[1].activity, None);
+
+        // A new turn forgets finished subagents but keeps running ones.
+        session.new_turn();
+        let ids: Vec<&str> = session.subagents.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["a1", "a3"]);
+    }
+
+    #[test]
+    fn subagent_ids_cannot_escape_the_transcript_folder() {
+        let mut session = Session::new(AgentKind::Claude, Instant::now());
+        session.transcript = Some("/t/abc.jsonl".into());
+        session.subagent_started("../../etc/passwd", "x", Instant::now());
+        assert_eq!(session.subagents[0].transcript, None);
+    }
+
+    #[test]
+    fn background_tasks_are_read_tolerantly() {
+        let mut session = Session::new(AgentKind::Claude, Instant::now());
+        session.note_background_tasks(&serde_json::json!({
+            "background_tasks": [
+                { "id": "sh1", "command": "npm run dev" },
+                { "description": "watching tests" },
+                "plain string",
+                { "unknown": 1 },
+                42
+            ]
+        }));
+        let labels: Vec<&str> = session.background_tasks.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["npm run dev", "watching tests", "plain string"]);
+        assert_eq!(session.background_tasks[0].id, "sh1");
+        // No list in the report leaves the tasks as they were.
+        session.note_background_tasks(&serde_json::json!({}));
+        assert_eq!(session.background_tasks.len(), 3);
+        session.note_background_tasks(&serde_json::json!({ "background_tasks": [] }));
+        assert!(session.background_tasks.is_empty());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 A fast, private terminal for macOS built for working with coding agents.
 No telemetry and no network access: the app never opens a connection.
 
-Status: milestone 5. A daily-usable terminal with tabs, splits, workspaces
+Status: milestone 6. A daily-usable terminal with tabs, splits, workspaces
 per project, search, clickable links, shell integration, ligatures, inline
 images, a command palette, and a sidebar showing what each coding agent is
 doing.
@@ -24,6 +24,7 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Shift+Cmd+P | Command palette |
 | Cmd+B | Show or hide the sidebar |
 | Shift+Cmd+B | Show or hide the agent board |
+| Option+Cmd+G | Show or hide the agent graph beside the focused agent |
 | Shift+Cmd+T | New agent session (runs `new_session_command`, `claude` by default) |
 | Shift+Cmd+A | Go to the next agent that needs you |
 | Cmd+P | Switch workspace (also: click the workspace name) |
@@ -88,6 +89,20 @@ Status travels over a Unix socket on this Mac; nothing uses the network.
 **Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
 Working, Done and Idle. Click a card, or move with the arrow keys and press
 Enter, to jump to that agent.
+
+**Graph** (Option+Cmd+G, or click an agent in the sidebar that has
+subagents): a panel beside the agent's terminal showing the agent, the
+subagents it launched, the ones those launched in turn, and its background
+tasks, as a tree. Each node shows what it was asked to do and what it is
+doing now, or its final answer once finished. Click a node to read its
+recent output below the tree: what it was asked, what it said, and the tools
+it called. This works for Claude Code with status hooks installed; the
+output is read from Claude Code's own conversation files under `~/.claude`.
+
+Claude Code offers no way for another program to send a message to a
+subagent or stop one, so the graph is for watching. When a subagent's
+request needs your approval the prompt appears in the agent's terminal,
+which is right beside the panel.
 
 **Archive**: when an agent's session ends it is filed under "Archived" at
 the bottom of the sidebar. Picking one opens a tab in the folder it ran in;

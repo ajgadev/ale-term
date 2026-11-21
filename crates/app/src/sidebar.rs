@@ -68,7 +68,13 @@ pub enum Row {
         current: bool,
     },
     /// A subagent, listed under its agent.
-    Subagent { target: Target, text: String, running: bool },
+    Subagent {
+        target: Target,
+        /// Position among the agent's subagents.
+        index: usize,
+        text: String,
+        running: bool,
+    },
     /// A plain shell or a running command.
     Shell { target: Target, text: String, current: bool },
 }
@@ -103,6 +109,8 @@ pub enum Hit {
     Filter(Filter),
     GroupToggle,
     Row(Target),
+    /// A subagent row: its agent's pane and the subagent's position.
+    Subagent(Target, usize),
     Archive,
     Notice,
     Nothing,
@@ -240,9 +248,8 @@ pub fn hit(model: &Model, area: Rect, cell: (f32, f32), scale: f32, scroll: f32,
         Item::Search => Hit::Search,
         Item::Chip(filter, _) => Hit::Filter(*filter),
         Item::GroupToggle => Hit::GroupToggle,
-        Item::Row(Row::Agent { target, .. } | Row::Subagent { target, .. } | Row::Shell { target, .. }) => {
-            Hit::Row(*target)
-        }
+        Item::Row(Row::Agent { target, .. } | Row::Shell { target, .. }) => Hit::Row(*target),
+        Item::Row(Row::Subagent { target, index, .. }) => Hit::Subagent(*target, *index),
         Item::Notice(_) => Hit::Notice,
         Item::Header(_) => Hit::Nothing,
     });

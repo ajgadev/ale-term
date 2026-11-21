@@ -8,6 +8,7 @@
 
 mod agents;
 mod frame;
+mod graph_panel;
 mod mouse;
 mod overlays;
 mod workspaces;
@@ -156,6 +157,7 @@ pub struct App {
     /// Agent sessions that have ended, for resuming later.
     archive: ale_agents::Archive,
     sidebar: agents::SidebarState,
+    graph: graph_panel::GraphState,
     /// Claude Code's settings already contain our status hooks.
     claude_hooks: bool,
     /// The user said no to installing them.
@@ -212,6 +214,7 @@ impl App {
             agent_server: None,
             archive,
             sidebar: agents::SidebarState { visible: sidebar_visible, ..Default::default() },
+            graph: graph_panel::GraphState::default(),
             claude_hooks: false,
             hooks_declined: false,
             last_sound: Instant::now(),
@@ -277,7 +280,8 @@ impl App {
         let (width, height) = self.window_size();
         let bar = TabBar::height(self.scale());
         let left = self.sidebar_width();
-        Rect::new(left, bar, (width - left).max(0.0), (height - bar).max(0.0))
+        let right = self.graph_width();
+        Rect::new(left, bar, (width - left - right).max(0.0), (height - bar).max(0.0))
     }
 
     fn tab_layout(&self, tab: &Tab) -> Layout {
@@ -619,6 +623,11 @@ impl App {
                     _ => Overlay::Board { selected: (0, 0) },
                 };
                 self.board_move(0, 0);
+            }
+            Action::ToggleGraph => {
+                self.graph.visible = !self.graph.visible;
+                self.sync_graph_layout();
+                self.redraw();
             }
             Action::NewAgentSession => self.new_agent_session(),
             Action::ShowArchive => self.open_list(ListKind::Archive),
@@ -983,6 +992,9 @@ impl ApplicationHandler<UserEvent> for App {
             wake_at(at);
         }
         if let Some(at) = self.tick_agents() {
+            wake_at(at);
+        }
+        if let Some(at) = self.refresh_graph() {
             wake_at(at);
         }
         if let Some(at) = self.refresh_elapsed() {

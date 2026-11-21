@@ -11,7 +11,8 @@ pub mod hooks;
 pub mod hooks_claude;
 pub mod install;
 pub mod session;
+pub mod transcript;
 
 pub use archive::{Archive, ArchivedSession};
 pub use channel::{HookMessage, Server};
-pub use session::{AgentKind, AgentState, Change, Session, Subagent};
+pub use session::{AgentKind, AgentState, BackgroundTask, Change, Session, Subagent};
