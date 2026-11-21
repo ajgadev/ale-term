@@ -4,10 +4,24 @@
 #
 # The app is signed "ad hoc" (no Apple account needed), which is enough to
 # run it on the Mac that built it.
+#
+# By default it is built for this Mac's processor. With UNIVERSAL=1 it is
+# built for both Apple Silicon and Intel and the two are joined into one
+# program that runs on either (needs `rustup target add aarch64-apple-darwin
+# x86_64-apple-darwin`). The release workflow builds it that way.
 set -eu
 
 cd "$(dirname "$0")/.."
-cargo build --release -p ale-term
+if [ "${UNIVERSAL:-0}" = 1 ]; then
+    cargo build --release -p ale-term --target aarch64-apple-darwin
+    cargo build --release -p ale-term --target x86_64-apple-darwin
+    mkdir -p target/release
+    lipo -create -output target/release/ale-term \
+        target/aarch64-apple-darwin/release/ale-term \
+        target/x86_64-apple-darwin/release/ale-term
+else
+    cargo build --release -p ale-term
+fi
 
 VERSION=$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"name":"ale-term","version":"\([^"]*\)".*/\1/p')
 APP=target/release/ale-term.app

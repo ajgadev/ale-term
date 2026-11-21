@@ -1,0 +1,87 @@
+# Builds ale-term.app for macOS (Apple Silicon and Intel in one app) and
+# publishes it as a GitHub release.
+#
+#   git tag v0.1.1 && git push origin v0.1.1
+#
+# The tag must match `version` in Cargo.toml. Running the workflow by hand
+# (Actions tab, "Run workflow") builds the app without releasing it; the zip
+# is then attached to the run as an artifact.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache Rust builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"name":"ale-term","version":"\([^"]*\)".*/\1/p')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build the app
+        run: UNIVERSAL=1 ./scripts/bundle.sh
+
+      - name: Package
+        id: package
+        run: |
+          name="ale-term-${GITHUB_REF_NAME}-macos.zip"
+          ditto -c -k --keepParent target/release/ale-term.app "$name"
+          shasum -a 256 "$name" > "$name.sha256"
+          echo "zip=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ale-term-macos
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          notes="Download ${ZIP}, unzip it and drag ale-term.app into Applications. It runs on Apple Silicon and Intel Macs with macOS 12 or later.
+
+          The app is not signed with an Apple Developer ID, so macOS blocks it the first time: right-click it and choose Open, or run \`xattr -dr com.apple.quarantine /Applications/ale-term.app\` once."
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" \
+              --title "ale-term $GITHUB_REF_NAME" --notes "$notes"
+          fi

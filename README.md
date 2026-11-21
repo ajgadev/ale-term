@@ -39,7 +39,15 @@ open, and a first frame in about 120 ms.
 
 ## Quick start
 
-> Needs macOS and a Rust toolchain: `brew install rustup && rustup default stable`.
+**Download**: the [Releases](https://github.com/ajgadev/ale-term/releases)
+page has a ready-made app for Apple Silicon and Intel Macs (macOS 12 or
+later); no Rust needed. Unzip it, drag `ale-term.app` into Applications and,
+the first time, right-click it and choose Open: it is not signed with an
+Apple Developer ID, so macOS asks first. (Or run `xattr -dr
+com.apple.quarantine /Applications/ale-term.app` once.)
+
+**Or build it yourself** (needs a Rust toolchain: `brew install rustup &&
+rustup default stable`):
 
 ```sh
 ./scripts/bundle.sh                # builds target/release/ale-term.app
@@ -444,6 +452,20 @@ python3 scripts/make-icon.py          # regenerate the app icon
 
 A test fails when a command is added to the palette but not to the table
 above; running `scripts/readme-commands.py` brings the table up to date.
+
+**Releases** are built by GitHub Actions (`.github/workflows/release.yml`):
+set the new `version` in `Cargo.toml`, commit, then tag and push it.
+
+```sh
+git tag v0.1.1 && git push origin v0.1.1
+```
+
+The workflow checks that the tag matches the version, runs the tests,
+builds one app for both Apple Silicon and Intel (`UNIVERSAL=1
+./scripts/bundle.sh`, which needs `rustup target add aarch64-apple-darwin
+x86_64-apple-darwin` to run locally), and publishes it as a release with a
+zip and its SHA-256 checksum. Running the workflow by hand from the Actions
+tab builds the zip without releasing it.
 
 **Snapshots.** `ale-term --snapshot out.bmp` draws the window into a BMP file
 and quits, for checking changes by eye. `--snapshot-delay <ms>` waits first,
