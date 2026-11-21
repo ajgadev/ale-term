@@ -20,17 +20,28 @@ impl App {
     }
 
     /// Shells without integration never announce their prompt; give them a
-    /// few seconds to start and then type anyway.
-    pub(super) fn flush_overdue_input(&mut self) {
-        let overdue: Vec<PaneId> = self
-            .panes
-            .iter()
-            .filter(|(_, pane)| pane.pending_input.is_some() && pane.created.elapsed() > Duration::from_secs(3))
-            .map(|(id, _)| *id)
-            .collect();
+    /// few seconds to start and then type anyway. Returns when the next
+    /// queued input falls due, so the caller can wake up for it.
+    pub(super) fn flush_overdue_input(&mut self) -> Option<Instant> {
+        const GRACE: Duration = Duration::from_secs(3);
+        let now = Instant::now();
+        let mut overdue = Vec::new();
+        let mut next: Option<Instant> = None;
+        for (id, pane) in &self.panes {
+            if pane.pending_input.is_none() {
+                continue;
+            }
+            let due = pane.created + GRACE;
+            if now >= due {
+                overdue.push(*id);
+            } else {
+                next = Some(next.map_or(due, |n| n.min(due)));
+            }
+        }
         for id in overdue {
             self.flush_pending_input(id);
         }
+        next
     }
 
     /// Refreshes the folder-name titles of panes without shell integration.
@@ -102,7 +113,6 @@ impl App {
     /// Describes the whole window to the renderer.
     pub(super) fn build_frame(&mut self) {
         self.refresh_fallback_titles();
-        self.flush_overdue_input();
         let layout = self.active_layout();
         let tab_bar = self.tab_bar();
         let visible = self.visible_tabs();
@@ -123,6 +133,7 @@ impl App {
             })
             .collect();
         let sidebar = self.sidebar_rect().map(|rect| (rect, self.sidebar_model(), self.sidebar.scroll));
+        let board = matches!(self.overlay, Overlay::Board { .. }).then(|| (self.content_rect(), self.board_model()));
         let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
         let workspace_name = self.workspace_name().to_owned();
         // Rows of an open list overlay, computed before the renderer is
@@ -198,6 +209,11 @@ impl App {
             Overlay::Search { pane, query, failed } => {
                 if let Some(rect) = layout.rect_of(*pane) {
                     overlay::draw_search(renderer, query, *failed, rect, scale, palette);
+                }
+            }
+            Overlay::Board { .. } => {
+                if let Some((rect, model)) = &board {
+                    crate::board::draw(renderer, model, *rect, scale, palette);
                 }
             }
             Overlay::None => {}

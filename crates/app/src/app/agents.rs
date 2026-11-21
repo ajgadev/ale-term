@@ -7,6 +7,10 @@ use ale_agents::channel::{self, ENV_BIN, ENV_PANE, ENV_SOCKET};
 use ale_agents::{AgentKind, AgentState, Change, HookMessage, Server, Session, hooks, install};
 
 use super::*;
+use ale_agents::ArchivedSession;
+use ale_agents::archive;
+
+use crate::board;
 use crate::overlay::Confirm;
 use crate::sidebar::{self, Filter, Group, Hit, Model, Row, Target};
 
@@ -122,7 +126,7 @@ impl App {
                 let change = session.set_idle(now);
                 return self.agent_changed(pane_id, change);
             }
-            pane.agent = None;
+            self.archive_agent(pane_id);
             return self.redraw();
         }
         self.agent_changed(pane_id, change);
@@ -131,27 +135,135 @@ impl App {
     /// The shell reported a command starting or ending: an agent session
     /// begins when its command starts and ends when it exits.
     pub(super) fn sync_agent(&mut self, pane_id: PaneId) {
-        let Some(pane) = self.panes.get_mut(&pane_id) else { return };
+        let Some(pane) = self.panes.get(&pane_id) else { return };
         let shell = pane.terminal.shell();
         if !shell.integrated {
             return;
         }
-        match shell.command.as_deref() {
-            None => pane.agent = None,
-            Some(command) => {
-                let kind = AgentKind::from_command(command);
-                match (&pane.agent, kind) {
-                    (None, Some(kind)) => pane.agent = Some(Session::new(kind, Instant::now())),
-                    (Some(session), Some(kind)) if session.kind != kind => {
-                        pane.agent = Some(Session::new(kind, Instant::now()));
-                    }
-                    // An agent started under another name (an alias, a
-                    // wrapper script) still reports through its hooks.
-                    (Some(session), None) if !session.hooked => pane.agent = None,
-                    _ => {}
-                }
+        let running = shell.command.as_deref().and_then(AgentKind::from_command);
+        let current = pane.agent.as_ref().map(|session| (session.kind, session.hooked));
+        let start = match (shell.command.is_some(), current, running) {
+            // Back at the prompt: whatever was running has ended.
+            (false, Some(_), _) => None,
+            (false, None, _) => return,
+            // A different agent than the one we were following.
+            (true, Some((kind, _)), Some(new)) if kind != new => Some(new),
+            (true, None, Some(new)) => Some(new),
+            // An agent started under another name (an alias, a wrapper
+            // script) still reports through its hooks; keep following it.
+            (true, Some((_, true)), None) => return,
+            (true, Some((_, false)), None) => None,
+            _ => return,
+        };
+        self.archive_agent(pane_id);
+        if let (Some(kind), Some(pane)) = (start, self.panes.get_mut(&pane_id)) {
+            pane.agent = Some(Session::new(kind, Instant::now()));
+        }
+    }
+
+    // ---- Archive ------------------------------------------------------------
+
+    /// Ends the agent session in a pane, if any, and files it in the
+    /// archive. Sessions that never did anything (say, `claude --version`)
+    /// are not worth keeping.
+    pub(super) fn archive_agent(&mut self, pane_id: PaneId) {
+        let Some(pane) = self.panes.get_mut(&pane_id) else { return };
+        let Some(session) = pane.agent.take() else { return };
+        if !session.hooked && session.title.is_none() {
+            return;
+        }
+        let pane = &self.panes[&pane_id];
+        let project = self
+            .tabs
+            .iter()
+            .find(|tab| tab.root.panes().contains(&pane_id))
+            .and_then(|tab| self.workspace(tab.workspace))
+            .map_or_else(String::new, |workspace| workspace.name.clone());
+        let entry = ArchivedSession {
+            agent: session.kind.slug().to_owned(),
+            title: self.agent_title(pane, &session),
+            cwd: session.cwd.clone().or_else(|| pane.terminal.working_directory()),
+            project,
+            session_id: session.session_id.clone(),
+            ended_at: archive::now(),
+            duration: session.started.elapsed().as_secs(),
+        };
+        self.archive.add(entry);
+        self.redraw();
+    }
+
+    /// Opens a new tab and starts the configured agent in it.
+    pub(super) fn new_agent_session(&mut self) {
+        let command = self.config.agents.new_session_command.trim().to_owned();
+        let before = self.panes.len();
+        self.new_tab(None);
+        if self.panes.len() > before
+            && !command.is_empty()
+            && let Some(id) = self.focused_pane_id()
+        {
+            self.type_when_ready(id, format!("{command}\r").into_bytes());
+        }
+    }
+
+    /// Takes a session out of the archive and continues it in a new tab,
+    /// in the folder it ran in.
+    ///
+    /// Where the agent can resume a conversation by id, that command is
+    /// run. Otherwise the agent's start command is typed but not run,
+    /// since starting a fresh conversation may not be what was meant.
+    pub(super) fn resume_archived(&mut self, index: usize) {
+        let Some(session) = self.archive.take(index) else { return };
+        let directory = session.cwd.clone().filter(|cwd| cwd.is_dir());
+        let before = self.panes.len();
+        self.new_tab(directory);
+        if self.panes.len() == before {
+            // The tab could not be opened; keep the session archived.
+            self.archive.add(session);
+            return;
+        }
+        let Some(id) = self.focused_pane_id() else { return };
+        let input = match (session.resume_command(), session.kind()) {
+            (Some(command), _) => format!("{command}\r"),
+            (None, Some(kind)) => archive::start_command(kind).to_owned(),
+            (None, None) => return,
+        };
+        self.type_when_ready(id, input.into_bytes());
+    }
+
+    // ---- Board --------------------------------------------------------------
+
+    pub(super) fn board_model(&self) -> board::Model {
+        let now = Instant::now();
+        let mut model = board::Model::default();
+        for tab in &self.tabs {
+            let project = self.workspace(tab.workspace).map_or("", |w| w.name.as_str());
+            for pane_id in tab.root.panes() {
+                let Some(pane) = self.panes.get(&pane_id) else { continue };
+                let Some(session) = &pane.agent else { continue };
+                model.columns[board::column_of(session.state)].push(board::Card {
+                    target: Target { tab: tab.id, pane: pane_id },
+                    state: session.state,
+                    agent: session.kind.name().to_owned(),
+                    title: self.agent_title(pane, session),
+                    project: project.to_owned(),
+                    status: Self::agent_status(session),
+                    elapsed: sidebar::format_elapsed(now.duration_since(session.since).as_secs()),
+                });
             }
         }
+        if let Overlay::Board { selected } = self.overlay {
+            model.selected = selected;
+        }
+        model
+    }
+
+    /// Moves the board's selection, keeping it on a real card.
+    pub(super) fn board_move(&mut self, dx: isize, dy: isize) {
+        let counts = self.board_model().columns.each_ref().map(Vec::len);
+        if let Overlay::Board { selected } = &mut self.overlay {
+            *selected = board::step(counts, *selected, dx, dy);
+        }
+        self.redraw();
     }
 
     /// The pane printed something (used when the agent has no hooks).
@@ -456,6 +568,7 @@ impl App {
             query: self.sidebar.query.clone(),
             searching: self.sidebar.searching,
             notice: self.hooks_notice(),
+            archived: self.archive.len(),
         }
     }
 
@@ -491,6 +604,8 @@ impl App {
             }
             Hit::Search => self.sidebar.searching = true,
             Hit::Notice => self.offer_hooks(),
+            Hit::NewSession => self.new_agent_session(),
+            Hit::Archive => self.open_list(ListKind::Archive),
             Hit::TitleBar => {
                 let clicks = self.register_click();
                 if let Some(window) = &self.window {

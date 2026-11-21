@@ -62,6 +62,25 @@ impl App {
 
         // An open palette takes every click: on a row runs it, elsewhere
         // closes the palette.
+        // The board: a click on a card goes to that agent; a click on the
+        // empty part of the board does nothing; a click elsewhere (sidebar,
+        // tabs) closes the board and is handled as usual.
+        if matches!(self.overlay, Overlay::Board { .. }) {
+            let area = self.content_rect();
+            if area.contains(x, y) {
+                let metrics = self.renderer.as_ref().map(|r| r.metrics());
+                let target = metrics.and_then(|m| {
+                    crate::board::hit(&self.board_model(), area, (m.width, m.height), self.scale(), x, y)
+                });
+                if let (Some(target), MouseButton::Left) = (target, mouse_button) {
+                    self.close_overlay();
+                    self.go_to(target);
+                }
+                return;
+            }
+            self.close_overlay();
+        }
+
         if self.overlay.is_modal() {
             let mut chosen = None;
             if let Overlay::Palette { kind, query, selected } = &self.overlay {

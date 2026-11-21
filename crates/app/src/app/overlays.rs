@@ -15,6 +15,12 @@ impl App {
             Key::Named(NamedKey::Enter) => return self.overlay_confirm(shift, event_loop),
             Key::Named(NamedKey::ArrowUp) => return self.overlay_move(-1),
             Key::Named(NamedKey::ArrowDown) => return self.overlay_move(1),
+            Key::Named(NamedKey::ArrowLeft) if matches!(self.overlay, Overlay::Board { .. }) => {
+                return self.board_move(-1, 0);
+            }
+            Key::Named(NamedKey::ArrowRight) if matches!(self.overlay, Overlay::Board { .. }) => {
+                return self.board_move(1, 0);
+            }
             Key::Named(NamedKey::Backspace) => {
                 if let Some(query) = self.overlay.query_mut() {
                     if command {
@@ -36,7 +42,9 @@ impl App {
             Some(action @ (Action::FindNext | Action::FindPrevious | Action::Quit)) => {
                 self.perform(action, event_loop);
             }
-            Some(Action::CommandPalette | Action::Find | Action::SwitchWorkspace) => self.close_overlay(),
+            Some(Action::CommandPalette | Action::Find | Action::SwitchWorkspace | Action::ToggleBoard) => {
+                self.close_overlay()
+            }
             Some(_) => {}
             None if !command => {
                 if let Some(text) = event.text.as_deref() {
@@ -62,7 +70,7 @@ impl App {
                 self.last_search = query.clone();
                 self.search_step(SearchDirection::Left, false);
             }
-            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
+            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) | Overlay::Board { .. } => {}
         }
         self.redraw();
     }
@@ -82,6 +90,7 @@ impl App {
                 let direction = if offset < 0 { SearchDirection::Left } else { SearchDirection::Right };
                 self.search_step(direction, true);
             }
+            Overlay::Board { .. } => self.board_move(0, offset),
             Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
         }
     }
@@ -99,6 +108,13 @@ impl App {
                 self.submit_input(kind, &text);
             }
             Overlay::Confirm(_) => self.confirm_accepted(),
+            Overlay::Board { .. } => {
+                let target = self.board_model().selected_card().map(|card| card.target);
+                self.close_overlay();
+                if let Some(target) = target {
+                    self.go_to(target);
+                }
+            }
             Overlay::Search { .. } => {
                 let direction = if shift { SearchDirection::Right } else { SearchDirection::Left };
                 self.search_step(direction, true);

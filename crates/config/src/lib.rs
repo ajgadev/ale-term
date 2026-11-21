@@ -192,11 +192,19 @@ pub struct AgentsConfig {
     /// Show a macOS notification when that happens while the window is not
     /// in front.
     pub notifications: bool,
+    /// The command the "New session" button runs in a new tab.
+    pub new_session_command: String,
 }
 
 impl Default for AgentsConfig {
     fn default() -> Self {
-        Self { sidebar: true, sidebar_width: 260.0, sound: true, notifications: true }
+        Self {
+            sidebar: true,
+            sidebar_width: 260.0,
+            sound: true,
+            notifications: true,
+            new_session_command: "claude".into(),
+        }
     }
 }
 

@@ -33,6 +33,8 @@ pub enum Choice {
     /// Index into the config's workspace templates.
     Template(usize),
     MoveTabTo(WorkspaceId),
+    /// Index into the session archive.
+    Archived(usize),
 }
 
 /// A path with the home folder shortened to `~`.
@@ -255,6 +257,18 @@ impl App {
                     });
                 }
             }
+            ListKind::Archive => {
+                let now = ale_agents::archive::now();
+                for (index, session) in self.archive.sessions().iter().enumerate() {
+                    let agent = session.kind().map_or(session.agent.as_str(), |kind| kind.name());
+                    let when = ale_agents::archive::time_ago(now, session.ended_at);
+                    items.push(ListItem {
+                        title: session.title.clone(),
+                        detail: format!("{agent} · {} · {when}", session.project),
+                        choice: Choice::Archived(index),
+                    });
+                }
+            }
             ListKind::MoveTab => {
                 for workspace in self.workspaces.iter().filter(|w| w.id != self.active_ws) {
                     items.push(ListItem {
@@ -280,6 +294,7 @@ impl App {
             Choice::Run(_) => {}
             Choice::Workspace(id) => self.switch_workspace(id),
             Choice::Template(index) => self.open_template(index),
+            Choice::Archived(index) => self.resume_archived(index),
             Choice::MoveTabTo(id) => {
                 // A deliberate move sticks: the tab no longer follows its
                 // folder.
@@ -484,9 +499,16 @@ impl App {
         }
         let describe = |id: PaneId| -> SavedPane {
             let Some(pane) = self.panes.get(&id) else { return SavedPane::default() };
+            // For an agent whose conversation can be resumed, offer that
+            // rather than the command that originally started it.
+            let resume = pane
+                .agent
+                .as_ref()
+                .and_then(|agent| ale_agents::archive::resume_command(agent.kind, agent.session_id.as_deref()));
             SavedPane {
                 cwd: pane.terminal.working_directory(),
-                command: pane.terminal.shell().command.filter(|command| !command.trim().is_empty()),
+                command: resume
+                    .or_else(|| pane.terminal.shell().command.filter(|command| !command.trim().is_empty())),
             }
         };
         let mut session = Session { version: SESSION_VERSION, active_workspace: 0, workspaces: Vec::new() };

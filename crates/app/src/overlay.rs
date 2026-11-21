@@ -19,6 +19,8 @@ pub enum ListKind {
     Workspaces,
     /// Destination for the current tab.
     MoveTab,
+    /// Ended agent sessions that can be resumed.
+    Archive,
 }
 
 impl ListKind {
@@ -27,6 +29,7 @@ impl ListKind {
             ListKind::Commands => "Type a command",
             ListKind::Workspaces => "Switch to a workspace",
             ListKind::MoveTab => "Move tab to workspace",
+            ListKind::Archive => "Resume an archived session",
         }
     }
 }
@@ -76,6 +79,10 @@ pub enum Overlay {
         query: String,
     },
     Confirm(Box<Confirm>),
+    /// The board of agents, with the selected card's column and row.
+    Board {
+        selected: (usize, usize),
+    },
     Search {
         pane: PaneId,
         query: String,
@@ -100,7 +107,7 @@ impl Overlay {
             Overlay::Palette { query, .. } | Overlay::Input { query, .. } | Overlay::Search { query, .. } => {
                 Some(query)
             }
-            Overlay::None | Overlay::Confirm(_) => None,
+            Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } => None,
         }
     }
 }

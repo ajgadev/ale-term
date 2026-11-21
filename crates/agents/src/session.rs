@@ -153,6 +153,8 @@ pub enum Change {
 pub struct Session {
     pub kind: AgentKind,
     pub state: AgentState,
+    /// When the session was first noticed.
+    pub started: Instant,
     /// When the state last changed.
     pub since: Instant,
     /// The task: the agent's own session title, or the first prompt.
@@ -182,6 +184,7 @@ impl Session {
         Session {
             kind,
             state: AgentState::Idle,
+            started: now,
             since: now,
             title: None,
             activity: None,

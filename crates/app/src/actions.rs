@@ -21,6 +21,10 @@ pub enum Action {
     MoveTab,
     SetUpWorkspace,
     ToggleSidebar,
+    ToggleBoard,
+    NewAgentSession,
+    ShowArchive,
+    ClearArchive,
     NextAttention,
     SetUpHooks,
     RemoveHooks,
@@ -68,6 +72,10 @@ pub const COMMANDS: &[(Action, &str, &str)] = &[
     (Action::MoveTab, "Move Tab to Workspace", ""),
     (Action::SetUpWorkspace, "Set Up Workspace Tabs from Template", ""),
     (Action::ToggleSidebar, "Toggle Sidebar", "⌘B"),
+    (Action::ToggleBoard, "Toggle Agent Board", "⇧⌘B"),
+    (Action::NewAgentSession, "New Agent Session", "⇧⌘T"),
+    (Action::ShowArchive, "Resume Archived Session", ""),
+    (Action::ClearArchive, "Clear Session Archive", ""),
     (Action::NextAttention, "Go to Next Agent That Needs You", "⇧⌘A"),
     (Action::SetUpHooks, "Set Up Claude Code Status Hooks", ""),
     (Action::RemoveHooks, "Remove Claude Code Status Hooks", ""),
@@ -145,7 +153,9 @@ pub fn from_key(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Optio
     }
     let Key::Character(text) = key else { return None };
     Some(match text.as_str() {
+        "t" if shift => Action::NewAgentSession,
         "t" => Action::NewTab,
+        "b" if shift => Action::ToggleBoard,
         "b" => Action::ToggleSidebar,
         "a" if shift => Action::NextAttention,
         "w" if shift => Action::CloseTab,

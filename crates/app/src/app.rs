@@ -153,6 +153,8 @@ pub struct App {
     save_at: Option<Instant>,
     /// Listens for status reports from agent hooks.
     agent_server: Option<ale_agents::Server>,
+    /// Agent sessions that have ended, for resuming later.
+    archive: ale_agents::Archive,
     sidebar: agents::SidebarState,
     /// Claude Code's settings already contain our status hooks.
     claude_hooks: bool,
@@ -188,6 +190,7 @@ impl App {
         let palette = config.palette(true);
         let state_dir = workspace::state_dir();
         let sidebar_visible = config.agents.sidebar;
+        let archive = state_dir.as_deref().map(ale_agents::Archive::load).unwrap_or_default();
         App {
             options,
             proxy,
@@ -207,6 +210,7 @@ impl App {
             state_dir,
             save_at: None,
             agent_server: None,
+            archive,
             sidebar: agents::SidebarState { visible: sidebar_visible, ..Default::default() },
             claude_hooks: false,
             hooks_declined: false,
@@ -431,6 +435,8 @@ impl App {
     /// Closes a pane, and its tab when it was the tab's last pane. Returns
     /// true when no tabs are left and the app should quit.
     fn close_pane(&mut self, id: PaneId) -> bool {
+        // An agent still running here ends with the pane.
+        self.archive_agent(id);
         self.panes.remove(&id);
         if let Some(renderer) = &mut self.renderer {
             renderer.retain_images(|key| key >> 32 != id);
@@ -606,6 +612,19 @@ impl App {
                 self.sidebar.visible = !self.sidebar.visible;
                 self.sidebar.searching = false;
                 self.relayout();
+            }
+            Action::ToggleBoard => {
+                self.overlay = match self.overlay {
+                    Overlay::Board { .. } => Overlay::None,
+                    _ => Overlay::Board { selected: (0, 0) },
+                };
+                self.board_move(0, 0);
+            }
+            Action::NewAgentSession => self.new_agent_session(),
+            Action::ShowArchive => self.open_list(ListKind::Archive),
+            Action::ClearArchive => {
+                self.archive.clear();
+                self.redraw();
             }
             Action::NextAttention => self.next_attention(),
             Action::SetUpHooks => self.offer_hooks(),
@@ -959,6 +978,9 @@ impl ApplicationHandler<UserEvent> for App {
             } else {
                 wake_at(at);
             }
+        }
+        if let Some(at) = self.flush_overdue_input() {
+            wake_at(at);
         }
         if let Some(at) = self.tick_agents() {
             wake_at(at);

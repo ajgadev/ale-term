@@ -89,6 +89,8 @@ pub struct Model {
     pub searching: bool,
     /// A hint shown at the bottom, e.g. that status hooks can be installed.
     pub notice: Option<String>,
+    /// How many ended sessions are in the archive.
+    pub archived: usize,
 }
 
 /// What a point in the sidebar is.
@@ -96,16 +98,20 @@ pub struct Model {
 pub enum Hit {
     /// The strip beside the traffic lights: drags the window.
     TitleBar,
+    NewSession,
     Search,
     Filter(Filter),
     GroupToggle,
     Row(Target),
+    Archive,
     Notice,
     Nothing,
 }
 
 /// One thing to draw, with where it goes.
 enum Item<'a> {
+    NewSession,
+    Archive(usize),
     Search,
     Chip(Filter, String),
     GroupToggle,
@@ -134,6 +140,11 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
     let mut items = Vec::new();
     let mut y = area.y + (TOP * scale).round();
 
+    // "New session" button.
+    let button_height = line + gap * 3.0;
+    items.push(Placed { rect: Rect::new(area.x + pad, y, area.w - pad * 2.0, button_height), item: Item::NewSession });
+    y += button_height + gap * 2.0;
+
     // Search box, with the grouping toggle to its right.
     let search_height = line + gap * 3.0;
     let toggle_width = cell.0 * 3.0;
@@ -157,8 +168,10 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
     }
     y += chip_height + gap * 3.0;
 
-    // Rows scroll under the fixed header above; a notice is pinned below.
-    let notice_height = if model.notice.is_some() { line + gap * 4.0 } else { 0.0 };
+    // Rows scroll under the fixed header above; the archive row and any
+    // notice are pinned below.
+    let pinned_row = line + gap * 4.0;
+    let notice_height = pinned_row + if model.notice.is_some() { pinned_row } else { 0.0 };
     let rows_top = y;
     let mut row_y = rows_top - scroll;
     for group in &model.groups {
@@ -183,16 +196,21 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
     // Drop rows scrolled out of the visible band so they are neither drawn
     // nor clickable.
     let band = (rows_top, area.y + area.h - notice_height);
-    let fixed = 5; // search, toggle, three chips
+    let fixed = 6; // new session, search, toggle, three chips
     let mut index = 0;
     items.retain(|placed| {
         index += 1;
         index <= fixed || (placed.rect.y >= band.0 - 1.0 && placed.rect.y + placed.rect.h <= band.1 + 1.0)
     });
 
+    let bottom = area.y + area.h;
+    items.push(Placed {
+        rect: Rect::new(area.x, bottom - pinned_row, area.w, pinned_row),
+        item: Item::Archive(model.archived),
+    });
     if let Some(notice) = &model.notice {
         items.push(Placed {
-            rect: Rect::new(area.x, area.y + area.h - notice_height, area.w, notice_height),
+            rect: Rect::new(area.x, bottom - pinned_row * 2.0, area.w, pinned_row),
             item: Item::Notice(notice),
         });
     }
@@ -202,8 +220,9 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
 /// The largest useful scroll offset for this model.
 pub fn max_scroll(model: &Model, area: Rect, cell: (f32, f32), scale: f32) -> f32 {
     let (items, content) = layout(model, area, cell, scale, 0.0);
-    let rows_top = items.get(4).map_or(area.y, |chip| chip.rect.y + chip.rect.h + (LINE_GAP * scale).round() * 3.0);
-    let notice = if model.notice.is_some() { cell.1 + (LINE_GAP * scale).round() * 4.0 } else { 0.0 };
+    let rows_top = items.get(5).map_or(area.y, |chip| chip.rect.y + chip.rect.h + (LINE_GAP * scale).round() * 3.0);
+    let pinned_row = cell.1 + (LINE_GAP * scale).round() * 4.0;
+    let notice = pinned_row + if model.notice.is_some() { pinned_row } else { 0.0 };
     (content - (area.y + area.h - notice - rows_top)).max(0.0)
 }
 
@@ -216,6 +235,8 @@ pub fn hit(model: &Model, area: Rect, cell: (f32, f32), scale: f32, scroll: f32,
     }
     let (items, _) = layout(model, area, cell, scale, scroll);
     let found = items.iter().find(|placed| placed.rect.contains(x, y)).map(|placed| match &placed.item {
+        Item::NewSession => Hit::NewSession,
+        Item::Archive(_) => Hit::Archive,
         Item::Search => Hit::Search,
         Item::Chip(filter, _) => Hit::Filter(*filter),
         Item::GroupToggle => Hit::GroupToggle,
@@ -259,6 +280,20 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
         let rect = placed.rect;
         let text_y = rect.y + ((rect.h - metrics.height) / 2.0).round();
         match &placed.item {
+            Item::NewSession => {
+                r.rect(rect.x, rect.y, rect.w, rect.h, color(palette.border));
+                let keys = "⇧⌘T";
+                let keys_width = r.text_width(keys);
+                r.text("+ New session", false, rect.x + gap * 2.0, text_y, rect.w - keys_width - gap * 5.0, fg);
+                r.text(keys, false, rect.x + rect.w - keys_width - gap * 2.0, text_y, keys_width, dim);
+            }
+            Item::Archive(count) => {
+                r.rect(rect.x, rect.y, rect.w - line, line, color(palette.border));
+                let count = count.to_string();
+                let count_width = r.text_width(&count);
+                r.text("Archived", false, rect.x + pad, text_y, rect.w, dim);
+                r.text(&count, false, rect.x + rect.w - pad - count_width, text_y, count_width, dim);
+            }
             Item::Search => {
                 let border = if model.searching { palette.accent } else { palette.border };
                 r.rect(rect.x, rect.y, rect.w, rect.h, color(palette.background));
@@ -383,21 +418,26 @@ mod tests {
         let at = |x, y| hit(&model, AREA, CELL, 1.0, 0.0, x, y);
         assert_eq!(at(300.0, 100.0), None);
         assert_eq!(at(100.0, 10.0), Some(Hit::TitleBar));
-        assert_eq!(at(100.0, 45.0), Some(Hit::Search));
-        assert_eq!(at(240.0, 45.0), Some(Hit::GroupToggle));
-        assert_eq!(at(20.0, 82.0), Some(Hit::Filter(Filter::All)));
-        assert_eq!(at(100.0, 82.0), Some(Hit::Filter(Filter::Waiting)));
-        assert_eq!(at(180.0, 82.0), Some(Hit::Filter(Filter::Working)));
+        // The fixed controls are 36px lower than the title strip: button
+        // (28px) plus a gap.
+        assert_eq!(at(100.0, 45.0), Some(Hit::NewSession));
+        assert_eq!(at(100.0, 81.0), Some(Hit::Search));
+        assert_eq!(at(240.0, 81.0), Some(Hit::GroupToggle));
+        assert_eq!(at(20.0, 118.0), Some(Hit::Filter(Filter::All)));
+        assert_eq!(at(100.0, 118.0), Some(Hit::Filter(Filter::Waiting)));
+        assert_eq!(at(180.0, 118.0), Some(Hit::Filter(Filter::Working)));
+        // The archive row is pinned to the bottom.
+        assert_eq!(at(50.0, 590.0), Some(Hit::Archive));
         // The chips fit inside the sidebar at its default width.
         let (placed, _) = layout(&model, AREA, CELL, 1.0, 0.0);
-        assert!(placed.iter().take(5).all(|p| p.rect.x + p.rect.w <= AREA.w - 12.0 + 0.5));
+        assert!(placed.iter().take(6).all(|p| p.rect.x + p.rect.w <= AREA.w - 12.0 + 0.5));
         // Rows: header first, then one row per agent, 48px each.
         let (items, _) = layout(&model, AREA, CELL, 1.0, 0.0);
         let rows: Vec<&Placed> = items.iter().filter(|p| matches!(p.item, Item::Row(_))).collect();
         assert_eq!(rows.len(), 3);
         let second = rows[1].rect;
         assert_eq!(at(50.0, second.y + 5.0), Some(Hit::Row(Target { tab: 1, pane: 1 })));
-        assert_eq!(at(50.0, 590.0), Some(Hit::Nothing));
+        assert_eq!(at(50.0, 500.0), Some(Hit::Nothing));
     }
 
     #[test]
@@ -418,16 +458,18 @@ mod tests {
             .collect();
         assert_eq!(panes.last(), Some(&39));
         assert!(!panes.contains(&0));
-        // Nothing is placed over the fixed header.
-        let header_bottom = items[4].rect.y + items[4].rect.h;
-        assert!(items.iter().skip(5).all(|p| p.rect.y >= header_bottom));
+        // No row is placed over the fixed header.
+        let header_bottom = items[5].rect.y + items[5].rect.h;
+        assert!(items.iter().filter(|p| matches!(p.item, Item::Row(_))).all(|p| p.rect.y >= header_bottom));
     }
 
     #[test]
     fn notice_is_pinned_to_the_bottom() {
         let mut model = model(1);
         model.notice = Some("Set up status".into());
-        assert_eq!(hit(&model, AREA, CELL, 1.0, 0.0, 50.0, 595.0), Some(Hit::Notice));
+        // Above the archive row.
+        assert_eq!(hit(&model, AREA, CELL, 1.0, 0.0, 50.0, 560.0), Some(Hit::Notice));
+        assert_eq!(hit(&model, AREA, CELL, 1.0, 0.0, 50.0, 595.0), Some(Hit::Archive));
     }
 
     #[test]

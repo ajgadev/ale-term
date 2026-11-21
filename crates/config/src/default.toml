@@ -40,6 +40,8 @@ sidebar_width = 260.0
 sound = true
 # Show a macOS notification for the same, when the window is not in front.
 notifications = true
+# What the "New session" button (Shift+Cmd+T) runs in a new tab.
+new_session_command = "claude"
 
 [theme]
 # "auto" follows the macOS appearance; or force "dark" / "light".

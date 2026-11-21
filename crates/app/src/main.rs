@@ -9,6 +9,7 @@
 
 mod actions;
 mod app;
+mod board;
 mod boxdraw;
 mod chrome;
 mod draw;

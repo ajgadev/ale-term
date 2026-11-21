@@ -3,7 +3,7 @@
 A fast, private terminal for macOS built for working with coding agents.
 No telemetry and no network access: the app never opens a connection.
 
-Status: milestone 4. A daily-usable terminal with tabs, splits, workspaces
+Status: milestone 5. A daily-usable terminal with tabs, splits, workspaces
 per project, search, clickable links, shell integration, ligatures, inline
 images, a command palette, and a sidebar showing what each coding agent is
 doing.
@@ -23,6 +23,8 @@ Every command is also in the command palette (Shift+Cmd+P).
 |---|---|
 | Shift+Cmd+P | Command palette |
 | Cmd+B | Show or hide the sidebar |
+| Shift+Cmd+B | Show or hide the agent board |
+| Shift+Cmd+T | New agent session (runs `new_session_command`, `claude` by default) |
 | Shift+Cmd+A | Go to the next agent that needs you |
 | Cmd+P | Switch workspace (also: click the workspace name) |
 | Ctrl+Cmd+Right / Left | Next / previous workspace |
@@ -82,6 +84,21 @@ How the status is known:
   cannot tell "finished" from "waiting for an answer" as reliably as hooks.
 
 Status travels over a Unix socket on this Mac; nothing uses the network.
+
+**Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
+Working, Done and Idle. Click a card, or move with the arrow keys and press
+Enter, to jump to that agent.
+
+**Archive**: when an agent's session ends it is filed under "Archived" at
+the bottom of the sidebar. Picking one opens a tab in the folder it ran in;
+Claude Code sessions are resumed with `claude --resume <id>`, and for other
+agents the start command is typed for you to run. Only the task name, agent,
+folder and session id are kept, never anything that was printed. "Clear
+Session Archive" in the palette empties it.
+
+**After a restart**, a pane that had Claude Code running gets `claude
+--resume <id>` typed at its prompt; press Enter to continue that
+conversation.
 
 Codex, Gemini CLI and Kiro have hook systems of their own, and `ale-term
 hook <agent>` already understands their events, but installing into their
