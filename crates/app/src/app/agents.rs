@@ -345,13 +345,9 @@ impl App {
     }
 
     /// Keeps the elapsed times in the sidebar current. Returns when to
-    /// redraw next: every ten seconds while something is under a minute
-    /// old, otherwise once a minute.
-    ///
-    /// Deliberately not every second: each redraw makes the graphics
-    /// driver hold on to its working memory (about 150 MB) for a few
-    /// seconds, so a ticking clock would keep that memory in use for as
-    /// long as any agent is listed.
+    /// redraw next: while something is under a minute old, every second on
+    /// the CPU renderer and every ten on the GPU renderer; after that,
+    /// once a minute.
     pub(super) fn refresh_elapsed(&mut self) -> Option<Instant> {
         if !self.sidebar.visible {
             self.elapsed_refresh = None;
@@ -368,7 +364,14 @@ impl App {
             self.elapsed_refresh = None;
             self.redraw();
         }
-        let interval = if youngest < Duration::from_secs(60) { 10 } else { 60 };
+        // On the GPU renderer every redraw keeps the driver's working
+        // memory in use, so the clock ticks coarsely there.
+        let cpu = self.renderer.as_ref().is_some_and(|r| r.backend() == Backend::Cpu);
+        let interval = match (youngest < Duration::from_secs(60), cpu) {
+            (true, true) => 1,
+            (true, false) => 10,
+            (false, _) => 60,
+        };
         Some(*self.elapsed_refresh.get_or_insert(now + Duration::from_secs(interval)))
     }
 

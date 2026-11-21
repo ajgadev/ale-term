@@ -217,6 +217,9 @@ impl App {
                     overlay::draw_search(renderer, query, *failed, rect, scale, palette);
                 }
             }
+            Overlay::Settings { selected, editing } => {
+                crate::settings::draw(renderer, &self.config, *selected, editing.as_deref(), window, scale, palette);
+            }
             Overlay::Board { .. } => {
                 if let Some((rect, model)) = &board {
                     crate::board::draw(renderer, model, *rect, scale, palette);

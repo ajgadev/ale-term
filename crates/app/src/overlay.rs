@@ -79,6 +79,12 @@ pub enum Overlay {
         query: String,
     },
     Confirm(Box<Confirm>),
+    /// The settings screen: which setting is selected and, while a text
+    /// setting is being typed, the text so far.
+    Settings {
+        selected: usize,
+        editing: Option<String>,
+    },
     /// The board of agents, with the selected card's column and row.
     Board {
         selected: (usize, usize),
@@ -98,7 +104,10 @@ impl Overlay {
 
     /// True for overlays that cover the window and take every click.
     pub fn is_modal(&self) -> bool {
-        matches!(self, Overlay::Palette { .. } | Overlay::Input { .. } | Overlay::Confirm(_))
+        matches!(
+            self,
+            Overlay::Palette { .. } | Overlay::Input { .. } | Overlay::Confirm(_) | Overlay::Settings { .. }
+        )
     }
 
     /// The text being edited, if any.
@@ -107,6 +116,7 @@ impl Overlay {
             Overlay::Palette { query, .. } | Overlay::Input { query, .. } | Overlay::Search { query, .. } => {
                 Some(query)
             }
+            Overlay::Settings { editing, .. } => editing.as_mut(),
             Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } => None,
         }
     }

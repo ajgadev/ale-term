@@ -10,6 +10,9 @@ impl App {
     pub(super) fn overlay_key(&mut self, event: &KeyEvent, action: Option<Action>, event_loop: &ActiveEventLoop) {
         let shift = self.modifiers.shift_key();
         let command = self.modifiers.super_key() || self.modifiers.control_key();
+        if matches!(self.overlay, Overlay::Settings { .. }) && self.settings_key(event) {
+            return;
+        }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => return self.close_overlay(),
             Key::Named(NamedKey::Enter) => return self.overlay_confirm(shift, event_loop),
@@ -70,7 +73,11 @@ impl App {
                 self.last_search = query.clone();
                 self.search_step(SearchDirection::Left, false);
             }
-            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) | Overlay::Board { .. } => {}
+            Overlay::None
+            | Overlay::Input { .. }
+            | Overlay::Confirm(_)
+            | Overlay::Board { .. }
+            | Overlay::Settings { .. } => {}
         }
         self.redraw();
     }
@@ -91,7 +98,7 @@ impl App {
                 self.search_step(direction, true);
             }
             Overlay::Board { .. } => self.board_move(0, offset),
-            Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
+            Overlay::Settings { .. } | Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
         }
     }
 
@@ -119,7 +126,7 @@ impl App {
                 let direction = if shift { SearchDirection::Right } else { SearchDirection::Left };
                 self.search_step(direction, true);
             }
-            Overlay::None => {}
+            Overlay::Settings { .. } | Overlay::None => {}
         }
     }
 
@@ -275,5 +282,109 @@ impl App {
         pane.terminal.lock().grid_mut().clear_history();
         pane.terminal.write(&b"\x0c"[..]);
         self.redraw();
+    }
+
+    // ---- Settings screen ----------------------------------------------------
+
+    /// Keyboard handling for the settings screen. Returns true when the
+    /// key was used (Esc while not editing is left to close the screen).
+    fn settings_key(&mut self, event: &KeyEvent) -> bool {
+        let Overlay::Settings { selected, editing } = &mut self.overlay else { return false };
+        let count = crate::settings::SETTINGS.len();
+        let index = (*selected).min(count - 1);
+
+        // Typing a text value.
+        if let Some(text) = editing {
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    let value = ale_config::SettingValue::Text(text.trim().to_owned());
+                    *editing = None;
+                    self.settings_write(index, value);
+                }
+                Key::Named(NamedKey::Escape) => *editing = None,
+                Key::Named(NamedKey::Backspace) => {
+                    text.pop();
+                }
+                _ => {
+                    let plain = !self.modifiers.super_key() && !self.modifiers.control_key();
+                    if let (true, Some(typed)) = (plain, event.text.as_deref()) {
+                        text.extend(typed.chars().filter(|c| !c.is_control()));
+                    }
+                }
+            }
+            self.redraw();
+            return true;
+        }
+
+        let step = |app: &mut Self, direction: i32| {
+            let setting = &crate::settings::SETTINGS[index];
+            let value = crate::settings::current(&app.config, setting);
+            if let Some(new) = crate::settings::stepped(setting, &value, direction) {
+                app.settings_write(index, new);
+            }
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::ArrowUp) => *selected = index.saturating_sub(1),
+            Key::Named(NamedKey::ArrowDown) => *selected = (index + 1).min(count - 1),
+            Key::Named(NamedKey::ArrowLeft) => step(self, -1),
+            Key::Named(NamedKey::ArrowRight) => step(self, 1),
+            Key::Named(NamedKey::Enter | NamedKey::Space) => self.settings_activate(index),
+            // Cmd+E: the file itself, for everything not listed here.
+            Key::Character(key) if key.as_str() == "e" && self.modifiers.super_key() => open_config_file(),
+            _ => return false,
+        }
+        self.redraw();
+        true
+    }
+
+    /// Enter or a click on a setting: toggles and choices change, text
+    /// starts being edited, numbers are left to the arrow keys.
+    pub(super) fn settings_activate(&mut self, index: usize) {
+        let setting = &crate::settings::SETTINGS[index];
+        let value = crate::settings::current(&self.config, setting);
+        match setting.kind {
+            crate::settings::Kind::Text => {
+                if let Overlay::Settings { editing, .. } = &mut self.overlay {
+                    *editing = Some(crate::settings::display(&value));
+                }
+            }
+            crate::settings::Kind::Toggle | crate::settings::Kind::Choice(_) => {
+                if let Some(new) = crate::settings::stepped(setting, &value, 1) {
+                    self.settings_write(index, new);
+                }
+            }
+            crate::settings::Kind::Number { .. } => {}
+        }
+        self.redraw();
+    }
+
+    /// Test hook: steps the setting named `section.key` up ("+") or down.
+    pub(super) fn script_setting(&mut self, change: &str) {
+        let mut parts = change.rsplitn(2, ':');
+        let (direction, name) = (parts.next().unwrap_or("+"), parts.next().unwrap_or(""));
+        let found = crate::settings::SETTINGS
+            .iter()
+            .position(|setting| format!("{}.{}", setting.section, setting.key) == name);
+        let Some(index) = found else { return eprintln!("ale-term: unknown setting {name:?}") };
+        let setting = &crate::settings::SETTINGS[index];
+        let value = crate::settings::current(&self.config, setting);
+        if let Some(new) = crate::settings::stepped(setting, &value, if direction == "-" { -1 } else { 1 }) {
+            self.settings_write(index, new);
+        }
+        if let Overlay::Settings { selected, .. } = &mut self.overlay {
+            *selected = index;
+        }
+    }
+
+    /// Writes a setting to the file and applies it at once.
+    fn settings_write(&mut self, index: usize, value: ale_config::SettingValue) {
+        let setting = &crate::settings::SETTINGS[index];
+        match ale_config::set_value(setting.section, setting.key, &value) {
+            Ok(()) => self.reload_config(),
+            Err(error) => {
+                let lines = error.lines().take(8).map(str::to_owned).collect();
+                self.show_message("The setting could not be saved", lines);
+            }
+        }
     }
 }

@@ -3,17 +3,24 @@
 A fast, private terminal for macOS built for working with coding agents.
 No telemetry and no network access: the app never opens a connection.
 
-Status: milestone 6. A daily-usable terminal with tabs, splits, workspaces
-per project, search, clickable links, shell integration, ligatures, inline
-images, a command palette, and a sidebar showing what each coding agent is
-doing.
+A terminal with tabs, splits and a workspace per project, plus a sidebar,
+board and graph showing what each coding agent is doing. About 45 MB of
+memory with a tab open, and a first frame in about 120 ms.
 
 ## Build and run
+
+Needs macOS and a Rust toolchain (`brew install rustup && rustup default
+stable`).
 
     ./scripts/bundle.sh                 # builds target/release/ale-term.app
     open target/release/ale-term.app
 
+To keep it, drag `target/release/ale-term.app` into Applications. The app
+is signed for this Mac only; to give it to someone else, have them build it
+or sign it with a Developer ID.
+
 During development: `cargo run -p ale-term`, and `cargo test --workspace`.
+`scripts/make-icon.py` regenerates the app icon.
 
 ## Shortcuts
 
@@ -43,7 +50,7 @@ Every command is also in the command palette (Shift+Cmd+P).
 | Shift+PageUp / PageDown | Scroll a page |
 | Cmd+K | Clear scrollback |
 | Cmd+= / Cmd+- / Cmd+0 | Font size |
-| Cmd+, | Open the config file |
+| Cmd+, | Settings |
 | Ctrl+Cmd+F | Full screen |
 
 Mouse: drag to select (double-click a word, triple-click a line), drag the
@@ -168,10 +175,38 @@ Both the iTerm2 protocol (`imgcat`) and the kitty graphics protocol
 (first frame). kitty's file and shared-memory transfer modes, animation and
 Unicode placeholders are not. Sixel is not supported.
 
-## Configuration
+## Settings
 
-`~/.config/ale-term/config.toml`, created on first run with every option
-documented. Changes apply when the file is saved.
+Cmd+, opens the settings screen: arrow keys to move and change values,
+Enter to toggle or to edit text. Changes apply immediately.
+
+The screen is a view onto one file, `~/.config/ale-term/config.toml`, which
+is created on first run with every option documented. Editing the file
+directly works just as well and is how colors and workspace templates are
+set; changes apply when it is saved. Changes made from the settings screen
+rewrite only the affected line, leaving your comments and layout alone. If
+the file has an error, ale-term says so and keeps the previous settings.
+
+## Privacy
+
+ale-term makes no network connections: there is no telemetry, no update
+check and no crash reporting, and no networking library is linked in.
+Agents report their status over a Unix socket on this Mac.
+
+What it stores, all under `~/.config/ale-term/`:
+
+| File | Contents |
+|---|---|
+| `config.toml` | Your settings |
+| `state/session.json` | Open workspaces, tabs, splits, folders and running command lines, for restoring |
+| `state/archive.json` | Ended agent sessions: task name, agent, folder, session id |
+| `state/approved.json` | Per-project template files you allowed to run |
+| `shell-integration/` | The zsh script it loads |
+
+Nothing a terminal or an agent printed is ever written to disk. It reads
+Claude Code's own conversation files under `~/.claude` to show a subagent's
+output, and writes to `~/.claude/settings.json` only if you ask it to
+install the status hooks.
 
 ## Rendering and memory
 

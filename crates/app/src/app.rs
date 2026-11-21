@@ -571,7 +571,17 @@ impl App {
                 self.apply_option_key();
             }
             Ok(_) => {}
-            Err(e) => log::warn!("config not reloaded: {e}"),
+            Err(error) => {
+                log::warn!("config not reloaded: {error}");
+                // Say so on screen, unless the user is in the middle of
+                // something else; the running settings stay in effect.
+                if !self.overlay.is_open() {
+                    let mut lines: Vec<String> = error.lines().take(8).map(str::to_owned).collect();
+                    lines.push(String::new());
+                    lines.push("The previous settings stay in effect until the file is fixed.".into());
+                    self.show_message("The settings file has an error", lines);
+                }
+            }
         }
     }
 
@@ -674,6 +684,10 @@ impl App {
                 }
             }
             Action::CommandPalette => self.open_list(ListKind::Commands),
+            Action::Settings => {
+                self.overlay = Overlay::Settings { selected: 0, editing: None };
+                self.redraw();
+            }
             Action::OpenConfig => open_config_file(),
             Action::Quit => event_loop.exit(),
         }
@@ -1011,6 +1025,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.overlay_type(text);
                 } else if step == "enter" {
                     self.overlay_confirm(false, event_loop);
+                } else if let Some(change) = step.strip_prefix("setting:") {
+                    // "setting:font.size:+" steps a setting as the arrow
+                    // keys in the settings screen would.
+                    self.script_setting(change);
                 } else if let Some(command) = actions::COMMANDS.iter().find(|c| c.1 == step) {
                     self.perform(command.0, event_loop);
                 } else {

@@ -81,6 +81,33 @@ impl App {
             self.close_overlay();
         }
 
+        // Settings: a click on a row selects it and, for switches and
+        // choices, changes it; a click outside the panel closes the screen.
+        if let Overlay::Settings { .. } = self.overlay {
+            let metrics = self.renderer.as_ref().map(|r| r.metrics());
+            let Some(metrics) = metrics else { return };
+            let selected = match &self.overlay {
+                Overlay::Settings { selected, .. } => *selected,
+                _ => 0,
+            };
+            let layout = crate::settings::ScreenLayout::new(
+                self.window_size(),
+                (metrics.width, metrics.height),
+                self.scale(),
+                selected,
+            );
+            match layout.setting_at(x, y) {
+                Some(index) if mouse_button == MouseButton::Left => {
+                    self.overlay = Overlay::Settings { selected: index, editing: None };
+                    self.settings_activate(index);
+                }
+                Some(_) => {}
+                None if layout.frame.contains(x, y) => {}
+                None => self.close_overlay(),
+            }
+            return;
+        }
+
         if self.overlay.is_modal() {
             let mut chosen = None;
             if let Overlay::Palette { kind, query, selected } = &self.overlay {

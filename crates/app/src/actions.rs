@@ -55,6 +55,7 @@ pub enum Action {
     ZoomReset,
     ToggleFullscreen,
     CommandPalette,
+    Settings,
     OpenConfig,
     Quit,
 }
@@ -108,7 +109,8 @@ pub const COMMANDS: &[(Action, &str, &str)] = &[
     (Action::ZoomReset, "Reset Font Size", "⌘0"),
     (Action::ToggleFullscreen, "Toggle Full Screen", "⌃⌘F"),
     (Action::CommandPalette, "Command Palette", "⇧⌘P"),
-    (Action::OpenConfig, "Open Settings File", "⌘,"),
+    (Action::Settings, "Settings", "⌘,"),
+    (Action::OpenConfig, "Open Settings File", ""),
     (Action::Quit, "Quit ale-term", "⌘Q"),
 ];
 
@@ -178,7 +180,7 @@ pub fn from_key(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Optio
         "=" | "+" => Action::ZoomIn,
         "-" => Action::ZoomOut,
         "0" => Action::ZoomReset,
-        "," => Action::OpenConfig,
+        "," => Action::Settings,
         digit if digit.len() == 1 && ("1"..="9").contains(&digit) => {
             Action::SelectTab(digit.as_bytes()[0] - b'1')
         }

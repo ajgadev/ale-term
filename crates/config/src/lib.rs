@@ -303,6 +303,72 @@ pub fn reload() -> Result<Config, String> {
     Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// A value to store in the config file.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingValue {
+    Bool(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+}
+
+/// Changes one setting in `text` (the contents of a config file) and
+/// returns the new contents.
+///
+/// Everything else in the file is left exactly as it was: comments, blank
+/// lines, the order of keys and settings this version does not know about.
+pub fn set_in_text(text: &str, section: &str, key: &str, value: &SettingValue) -> Result<String, String> {
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let table = document
+        .entry(section)
+        .or_insert_with(toml_edit::table)
+        .as_table_mut()
+        .ok_or_else(|| format!("[{section}] is not a table"))?;
+    let new = match value {
+        SettingValue::Bool(v) => toml_edit::value(*v),
+        SettingValue::Integer(v) => toml_edit::value(*v),
+        SettingValue::Float(v) => toml_edit::value(*v),
+        SettingValue::Text(v) => toml_edit::value(v.as_str()),
+    };
+    match table.get_mut(key) {
+        // Replace the value where it stands, so the comments above the key
+        // stay, and carry over the spacing and any comment after the value.
+        Some(existing) => {
+            let decor = existing.as_value().map(|value| value.decor().clone());
+            *existing = new;
+            if let (Some(decor), Some(value)) = (decor, existing.as_value_mut()) {
+                *value.decor_mut() = decor;
+            }
+        }
+        None => {
+            table.insert(key, new);
+        }
+    }
+    Ok(document.to_string())
+}
+
+/// Changes one setting in the config file on disk.
+///
+/// The result is checked to still be a valid configuration before it
+/// replaces the file, so a bad value can never leave the file unreadable.
+pub fn set_value(section: &str, key: &str, value: &SettingValue) -> Result<(), String> {
+    let path = config_path().ok_or("cannot locate the home directory")?;
+    let describe = |e: std::io::Error| format!("{}: {e}", path.display());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(describe(e)),
+    };
+    let updated = set_in_text(&text, section, key, value)?;
+    Config::parse(&updated)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(describe)?;
+    }
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, updated).map_err(describe)?;
+    std::fs::rename(&temporary, &path).map_err(describe)
+}
+
 /// Watches the config file and calls `on_change` whenever it is modified.
 ///
 /// This checks the file's modification time once a second on a background
@@ -395,6 +461,40 @@ mod tests {
         assert_eq!(tabs[0].command.as_deref(), Some("make dev"));
         assert!(parse_repo_template("shell = \"x\"").is_err());
         assert_eq!(parse_repo_template("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn changing_a_setting_keeps_the_rest_of_the_file() {
+        let original = "# My settings.\n\n[font]\nfamily = \"Menlo\"  # the classic\nsize = 13.0\n\n# Colors\n[theme]\nmode = \"auto\"\n";
+        let updated = set_in_text(original, "font", "size", &SettingValue::Float(15.5)).unwrap();
+        assert_eq!(updated, original.replace("size = 13.0", "size = 15.5"));
+        assert_eq!(Config::parse(&updated).unwrap().font.size, 15.5);
+
+        // A comment after the value survives the change.
+        let updated = set_in_text(original, "font", "family", &SettingValue::Text("Fira Code".into())).unwrap();
+        assert!(updated.contains("family = \"Fira Code\"  # the classic"), "{updated}");
+
+        // New keys and new sections are added.
+        let updated = set_in_text(original, "font", "ligatures", &SettingValue::Bool(false)).unwrap();
+        assert!(!Config::parse(&updated).unwrap().font.ligatures);
+        let updated = set_in_text(original, "terminal", "scrollback", &SettingValue::Integer(5000)).unwrap();
+        assert_eq!(Config::parse(&updated).unwrap().terminal.scrollback, 5000);
+        assert!(updated.starts_with("# My settings.\n"));
+
+        // An empty file works; a broken one is reported, not rewritten.
+        let updated = set_in_text("", "agents", "sound", &SettingValue::Bool(false)).unwrap();
+        assert!(!Config::parse(&updated).unwrap().agents.sound);
+        assert!(set_in_text("[font\nsize = 1", "font", "size", &SettingValue::Float(2.0)).is_err());
+    }
+
+    #[test]
+    fn the_default_template_can_be_edited_in_place() {
+        let updated = set_in_text(DEFAULT_CONFIG, "window", "renderer", &SettingValue::Text("gpu".into())).unwrap();
+        assert_eq!(Config::parse(&updated).unwrap().window.renderer, RendererChoice::Gpu);
+        // Only that one line changed.
+        let changed: Vec<(&str, &str)> =
+            DEFAULT_CONFIG.lines().zip(updated.lines()).filter(|(old, new)| old != new).collect();
+        assert_eq!(changed, [("renderer = \"cpu\"", "renderer = \"gpu\"")]);
     }
 
     #[test]
