@@ -19,7 +19,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    # GitHub's current Apple Silicon Mac. Named versions (macos-14, ...) are
+    # retired over time; this label always points to a supported one.
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
