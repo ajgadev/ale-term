@@ -129,7 +129,14 @@ impl App {
             message: None,
             actions,
             hooked: session.hooked,
-            plan: session.plan.clone(),
+            plan: session.shown_plan().clone(),
+            // Name the file when the plan comes from one.
+            plan_file: match &session.plan_file {
+                Some((path, _)) if session.plan.is_empty() => {
+                    path.file_name().map(|name| name.to_string_lossy().into_owned())
+                }
+                _ => None,
+            },
         };
         let transcript = session.transcript.clone();
         summary.message = transcript.and_then(|path| self.last_message(&path));

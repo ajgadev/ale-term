@@ -11,6 +11,18 @@
 //!   (`taskId` and whatever changed, `status: "deleted"` to drop one).
 //!
 //! Statuses are `pending`, `in_progress` and `completed`.
+//!
+//! Kiro keeps its list with a `todo_list` tool (tasks by 0-based position)
+//! or, in its newer engine, a task tool (tasks by id). Both take a
+//! `command` (`create`, `complete`, `add`, `remove`), are recognized by
+//! that shape, and work through the list in order, so the first task not
+//! done is the one in progress. When the reply carries the whole list, it
+//! is taken from there.
+//!
+//! A plan can also be a Markdown file of checkboxes the agent ticks as it
+//! goes (see [`Plan::from_markdown`]).
+
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -87,9 +99,145 @@ impl Plan {
             "TodoWrite" => self.write(input),
             "TaskCreate" => self.create(input, response),
             "TaskUpdate" => self.update(input),
+            _ if is_kiro_list(input) => self.kiro(input, response),
             _ => return false,
         }
         self.items != before
+    }
+
+    /// Kiro's to-do and task tools.
+    fn kiro(&mut self, input: &Value, response: &Value) {
+        // The reply's copy of the whole list, when it has one, is the
+        // most reliable.
+        if let Some(items) = listed_items(response) {
+            self.items = items;
+            self.mark_first_open();
+            return;
+        }
+        let task = |task: &Value| task["task_description"].as_str().map(|text| clean(text, TEXT));
+        let positions = |key: &str| -> Vec<usize> {
+            input[key].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|n| n as usize).collect()
+        };
+        let ids = |key: &str| -> Vec<String> { input[key].as_array().into_iter().flatten().filter_map(id_of).collect() };
+        match input["command"].as_str().unwrap_or("") {
+            "create" => {
+                self.items = input["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(task)
+                    .enumerate()
+                    .map(|(index, text)| PlanItem { id: (index + 1).to_string(), text, active: None, status: ItemStatus::Pending })
+                    .collect();
+            }
+            "complete" => {
+                for position in positions("completed_indices") {
+                    if let Some(item) = self.items.get_mut(position) {
+                        item.status = ItemStatus::Done;
+                    }
+                }
+                for id in ids("completed_task_ids") {
+                    if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                        item.status = ItemStatus::Done;
+                    }
+                }
+            }
+            "add" => {
+                let new: Vec<String> = input["new_tasks"].as_array().into_iter().flatten().filter_map(task).collect();
+                let at = positions("insert_indices");
+                for (index, text) in new.into_iter().enumerate() {
+                    let item = PlanItem { id: self.next_number().to_string(), text, active: None, status: ItemStatus::Pending };
+                    match at.get(index) {
+                        Some(&position) if position <= self.items.len() => self.items.insert(position, item),
+                        _ => self.items.push(item),
+                    }
+                }
+            }
+            "remove" => {
+                let mut at = positions("remove_indices");
+                at.sort_unstable();
+                for position in at.into_iter().rev() {
+                    if position < self.items.len() {
+                        self.items.remove(position);
+                    }
+                }
+                let gone = ids("remove_task_ids");
+                self.items.retain(|item| !gone.contains(&item.id));
+            }
+            // Another saved list was loaded, and its tasks are not known.
+            "load" => self.items.clear(),
+            _ => {}
+        }
+        self.mark_first_open();
+    }
+
+    /// Lists worked through in order have no "in progress" of their own:
+    /// the first item not done is the one being worked on.
+    fn mark_first_open(&mut self) {
+        for item in &mut self.items {
+            if item.status == ItemStatus::InProgress {
+                item.status = ItemStatus::Pending;
+            }
+        }
+        if let Some(item) = self.items.iter_mut().find(|item| item.status != ItemStatus::Done) {
+            item.status = ItemStatus::InProgress;
+        }
+    }
+
+    /// A plan from the checkboxes of a Markdown file: `- [ ]` to do,
+    /// `- [x]` done, and `- [-]`, `- [~]` or `- [/]` in progress. Lines in
+    /// code blocks are skipped. When none is marked in progress, the first
+    /// item not done is taken to be. `None` when there are no checkboxes.
+    pub fn from_markdown(text: &str) -> Option<Plan> {
+        let mut items = Vec::new();
+        let mut in_code = false;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                in_code = !in_code;
+                continue;
+            }
+            if in_code {
+                continue;
+            }
+            // A list marker ("-", "*", "+" or "1."), then "[?] ".
+            let rest = trimmed
+                .strip_prefix(['-', '*', '+'])
+                .or_else(|| trimmed.split_once(". ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())).map(|(_, rest)| rest))
+                .map(str::trim_start);
+            let Some(rest) = rest else { continue };
+            let mut chars = rest.chars();
+            let (Some('['), Some(mark), Some(']')) = (chars.next(), chars.next(), chars.next()) else { continue };
+            let status = match mark {
+                ' ' => ItemStatus::Pending,
+                'x' | 'X' => ItemStatus::Done,
+                '-' | '~' | '/' => ItemStatus::InProgress,
+                _ => continue,
+            };
+            let text = chars.as_str().trim();
+            if text.is_empty() {
+                continue;
+            }
+            items.push(PlanItem { id: (items.len() + 1).to_string(), text: clean(text, TEXT), active: None, status });
+        }
+        if items.is_empty() {
+            return None;
+        }
+        let mut plan = Plan { items };
+        if plan.current().is_none() {
+            plan.mark_first_open();
+        }
+        Some(plan)
+    }
+
+    /// The plan in a Markdown file, if it has checkboxes. Big files are
+    /// not plans.
+    pub fn from_file(path: &Path) -> Option<Plan> {
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > 512 * 1024 {
+            return None;
+        }
+        Plan::from_markdown(&std::fs::read_to_string(path).ok()?)
     }
 
     fn write(&mut self, input: &Value) {
@@ -150,6 +298,59 @@ impl Plan {
     }
 }
 
+/// The Markdown files a prompt names, as written: `@PLAN.md`,
+/// `docs/plan.md`, `".kiro/specs/x/tasks.md"`.
+pub fn markdown_files_named(prompt: &str) -> Vec<String> {
+    prompt
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .map(|word| {
+            word.trim_start_matches(['@', '"', '\'', '`'])
+                .trim_end_matches(['"', '\'', '`', '.', ',', ';', ':', '!', '?'])
+        })
+        .filter(|word| word.len() > 3 && word.to_ascii_lowercase().ends_with(".md"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a tool call looks like Kiro's to-do or task tool: a `command`
+/// it knows, with that tool's own fields.
+fn is_kiro_list(input: &Value) -> bool {
+    let known = ["tasks", "completed_indices", "completed_task_ids", "new_tasks", "remove_indices", "remove_task_ids", "load_id"];
+    matches!(input["command"].as_str(), Some("create" | "complete" | "add" | "remove" | "load"))
+        && known.iter().any(|key| input.get(*key).is_some())
+}
+
+/// A whole list in a reply: the first array of objects that each have a
+/// description and say whether they are done.
+fn listed_items(response: &Value) -> Option<Vec<PlanItem>> {
+    let items = |list: &Vec<Value>| -> Option<Vec<PlanItem>> {
+        let parsed: Vec<PlanItem> = list
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let text = ["task_description", "description", "content", "subject"].iter().find_map(|k| entry[*k].as_str())?;
+                let done = entry["completed"].as_bool().or_else(|| entry["status"].as_str().map(|s| s == "completed"))?;
+                Some(PlanItem {
+                    id: id_of(&entry["id"]).unwrap_or_else(|| (index + 1).to_string()),
+                    text: clean(text, TEXT),
+                    active: None,
+                    status: if done { ItemStatus::Done } else { ItemStatus::Pending },
+                })
+            })
+            .collect::<Option<_>>()?;
+        (!parsed.is_empty()).then_some(parsed)
+    };
+    match response {
+        Value::Array(list) => items(list).or_else(|| list.iter().find_map(listed_items)),
+        Value::Object(map) => map.values().find_map(listed_items),
+        // Replies are often JSON inside a string.
+        Value::String(text) if text.trim_start().starts_with(['{', '[']) => {
+            listed_items(&serde_json::from_str(text).ok()?)
+        }
+        _ => None,
+    }
+}
+
 /// An id given as a string or a number.
 fn id_of(value: &Value) -> Option<String> {
     match value {
@@ -205,6 +406,64 @@ mod tests {
         // Unknown tasks and other tools are ignored.
         assert!(!plan.apply("TaskUpdate", &json!({ "taskId": "9", "status": "completed" }), &json!({})));
         assert!(!plan.apply("Bash", &json!({ "command": "ls" }), &json!({})));
+    }
+
+    #[test]
+    fn kiros_todo_list_works_through_positions() {
+        let mut plan = Plan::default();
+        let task = |text: &str| json!({ "task_description": text });
+        let create = json!({ "command": "create", "todo_list_description": "pricing",
+            "tasks": [task("Read the styles"), task("Fix the heights"), task("Add a test")] });
+        assert!(plan.apply("todo_list", &create, &json!(null)));
+        // In order, so the first is the one in progress.
+        assert_eq!(plan.current().map(|i| i.text.as_str()), Some("Read the styles"));
+        plan.apply("todo_list", &json!({ "command": "complete", "completed_indices": [0], "context_update": "", "current_id": "x" }), &json!(null));
+        assert_eq!(plan.progress(), Some((1, 3)));
+        assert_eq!(plan.current().map(|i| i.text.as_str()), Some("Fix the heights"));
+        plan.apply("todo_list", &json!({ "command": "add", "new_tasks": [task("Update docs")], "insert_indices": [3], "current_id": "x" }), &json!(null));
+        plan.apply("todo_list", &json!({ "command": "remove", "remove_indices": [2], "current_id": "x" }), &json!(null));
+        let texts: Vec<&str> = plan.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["Read the styles", "Fix the heights", "Update docs"]);
+        // Looking the lists up changes nothing; other tools are not lists.
+        assert!(!plan.apply("todo_list", &json!({ "command": "lookup" }), &json!(null)));
+        assert!(!plan.apply("fs_write", &json!({ "command": "create", "path": "/x" }), &json!(null)));
+    }
+
+    #[test]
+    fn kiros_task_tool_works_by_id_and_trusts_a_listed_reply() {
+        let mut plan = Plan::default();
+        let create = json!({ "command": "create", "task_list_description": "x",
+            "tasks": [{ "task_description": "One" }, { "task_description": "Two" }] });
+        plan.apply("task", &create, &json!({}));
+        plan.apply("task", &json!({ "command": "complete", "completed_task_ids": ["1"], "context_update": "" }), &json!({}));
+        assert_eq!(plan.progress(), Some((1, 2)));
+        // A reply with the whole list (here as JSON in a string) wins.
+        let reply = json!(r#"{"tasks":[{"id":"a","task_description":"One","completed":true},{"id":"b","task_description":"Two","completed":true},{"id":"c","task_description":"Three","completed":false}]}"#);
+        plan.apply("task", &json!({ "command": "add", "new_tasks": [{ "task_description": "Three" }] }), &reply);
+        assert_eq!(plan.progress(), Some((2, 3)));
+        assert_eq!(plan.current().map(|i| i.id.as_str()), Some("c"));
+    }
+
+    #[test]
+    fn markdown_checkboxes_make_a_plan() {
+        let text = "# Pricing plan\n\n- [x] Read the styles\n- [ ] Fix the heights\n  * [ ] nested step\n1. [X] numbered\n```\n- [ ] not a task, code\n```\n- [] not a box\nplain text\n";
+        let plan = Plan::from_markdown(text).unwrap();
+        let texts: Vec<&str> = plan.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["Read the styles", "Fix the heights", "nested step", "numbered"]);
+        assert_eq!(plan.progress(), Some((2, 4)));
+        // None marked in progress: the first open one is.
+        assert_eq!(plan.current().map(|i| i.text.as_str()), Some("Fix the heights"));
+        // An explicit marker wins.
+        let marked = Plan::from_markdown("- [ ] a\n- [-] b\n").unwrap();
+        assert_eq!(marked.current().map(|i| i.text.as_str()), Some("b"));
+        assert_eq!(Plan::from_markdown("# no boxes\n- item\n"), None);
+    }
+
+    #[test]
+    fn markdown_files_are_found_in_a_prompt() {
+        let prompt = "implement @PLAN.md, then check `docs/notes.md`. See .kiro/specs/x/tasks.md! (not README)";
+        assert_eq!(markdown_files_named(prompt), ["PLAN.md", "docs/notes.md", ".kiro/specs/x/tasks.md"]);
+        assert!(markdown_files_named("no files here.").is_empty());
     }
 
     #[test]

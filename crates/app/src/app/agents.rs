@@ -470,7 +470,7 @@ impl App {
         // Working through a plan, the item in progress says more than the
         // tool it happens to be using.
         if matches!(session.state, AgentState::Working | AgentState::Waiting)
-            && let Some(item) = session.plan.current()
+            && let Some(item) = session.shown_plan().current()
         {
             return item.label().to_owned();
         }
@@ -540,7 +540,7 @@ impl App {
                     elapsed: shown_elapsed(session, now),
                     current,
                     icon: self.agent_icon(session),
-                    progress: session.plan.progress(),
+                    progress: session.shown_plan().progress(),
                 }];
                 for (index, subagent) in session.subagents.iter().enumerate() {
                     // Running ones, and those that finished a moment ago.

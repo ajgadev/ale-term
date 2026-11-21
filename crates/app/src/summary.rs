@@ -37,6 +37,8 @@ pub struct Summary {
     pub hooked: bool,
     /// The to-do list it is working through, if any.
     pub plan: Plan,
+    /// The Markdown file that plan comes from, if it does.
+    pub plan_file: Option<String>,
 }
 
 /// Width of the card, in text columns.
@@ -59,8 +61,8 @@ enum Line {
     Message(String),
     Action(String, String),
     Note(&'static str),
-    /// "Plan", with how many items are done.
-    PlanHeading(usize, usize),
+    /// "Plan", the file it comes from if any, and how many items are done.
+    PlanHeading(Option<String>, usize, usize),
     PlanItem(ItemStatus, String),
     /// Items of the plan not shown, before or after those listed.
     PlanMore(usize),
@@ -68,7 +70,7 @@ enum Line {
 
 /// The plan's lines: a window of items around the one in progress (or the
 /// first not done), with a note for those left out on either side.
-fn plan_lines(plan: &Plan) -> Vec<Line> {
+fn plan_lines(plan: &Plan, file: Option<&str>) -> Vec<Line> {
     let Some((done, total)) = plan.progress() else { return Vec::new() };
     let focus = plan
         .items
@@ -78,7 +80,7 @@ fn plan_lines(plan: &Plan) -> Vec<Line> {
         .unwrap_or(total.saturating_sub(1));
     let start = focus.saturating_sub(2).min(total.saturating_sub(PLAN_ITEMS));
     let end = (start + PLAN_ITEMS).min(total);
-    let mut lines = vec![Line::Divider, Line::PlanHeading(done, total)];
+    let mut lines = vec![Line::Divider, Line::PlanHeading(file.map(str::to_owned), done, total)];
     if start > 0 {
         lines.push(Line::PlanMore(start));
     }
@@ -94,7 +96,7 @@ fn plan_lines(plan: &Plan) -> Vec<Line> {
 
 fn lines(summary: &Summary) -> Vec<Line> {
     let mut lines = vec![Line::Header, Line::Title, Line::Status];
-    lines.extend(plan_lines(&summary.plan));
+    lines.extend(plan_lines(&summary.plan, summary.plan_file.as_deref()));
     if let Some(message) = summary.message.as_deref().filter(|m| !m.is_empty()) {
         lines.push(Line::Divider);
         lines.push(Line::Label("Last message"));
@@ -245,8 +247,12 @@ pub fn draw(r: &mut Renderer, summary: &Summary, pointer: (f32, f32), window: (f
             Line::Note(note) => {
                 r.text(note, false, left, text_y, width, dim);
             }
-            Line::PlanHeading(done, total) => {
-                let used = r.text("Plan", true, left, text_y, width, color(palette.accent));
+            Line::PlanHeading(file, done, total) => {
+                let mut used = r.text("Plan", true, left, text_y, width, color(palette.accent));
+                if let Some(file) = file {
+                    let name = fit(&format!(" · {file}"), (width - used) * 0.6, cell.0);
+                    used += r.text(&name, false, left + used, text_y, width - used, fg);
+                }
                 let count = format!("  {done} of {total} done");
                 r.text(&count, false, left + used, text_y, width - used, dim);
             }
@@ -289,6 +295,7 @@ mod tests {
             actions: vec![("Running npm test".into(), "2m".into()), ("Editing pricing.css".into(), "3m".into())],
             hooked: true,
             plan: Plan::default(),
+            plan_file: None,
         }
     }
 
@@ -320,7 +327,7 @@ mod tests {
             .map(|n| item(n, if n < 7 { ItemStatus::Done } else if n == 7 { ItemStatus::InProgress } else { ItemStatus::Pending }))
             .collect();
         let lines = lines(&with_plan);
-        assert!(lines.contains(&Line::PlanHeading(6, 12)));
+        assert!(lines.contains(&Line::PlanHeading(None, 6, 12)));
         let items: Vec<&String> = lines.iter().filter_map(|l| if let Line::PlanItem(_, t) = l { Some(t) } else { None }).collect();
         assert_eq!(items.len(), PLAN_ITEMS);
         assert_eq!(items[0], "step 5");

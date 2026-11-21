@@ -26,6 +26,7 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
             // resumed or compacted keeps it.
             if !matches!(payload["source"].as_str(), Some("resume" | "compact")) {
                 session.plan.clear();
+                session.plan_file = None;
             }
             session.set_state(AgentState::Idle, now)
         }
@@ -35,6 +36,10 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
                 // The first line of the first prompt names the task until
                 // the agent provides a better title.
                 session.suggest_title(prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or(""));
+                // A Markdown file named in the prompt may be the plan.
+                for file in crate::plan::markdown_files_named(&prompt) {
+                    session.consider_plan_file(&file, true);
+                }
             }
             session.set_activity("Thinking");
             session.set_state(AgentState::Working, now)
@@ -67,10 +72,25 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
             if payload.get("agent_id").is_some_and(|id| !id.is_null()) {
                 return Change::None;
             }
-            // The plan follows the to-do tools' successful calls.
+            // The plan follows the to-do tools' successful calls, and a
+            // plan file the agent reads or edits.
             if event == "PostToolUse" {
                 let tool = payload["tool_name"].as_str().unwrap_or("");
-                session.plan.apply(tool, &payload["tool_input"], &payload["tool_response"]);
+                let input = &payload["tool_input"];
+                let response = ["tool_response", "tool_output", "tool_result"]
+                    .iter()
+                    .map(|key| &payload[*key])
+                    .find(|value| !value.is_null())
+                    .unwrap_or(&Value::Null);
+                session.plan.apply(tool, input, response);
+                let file = input["file_path"].as_str().or_else(|| input["path"].as_str());
+                if let Some(file) = file.filter(|f| f.to_ascii_lowercase().ends_with(".md")) {
+                    // Editing a file of checkboxes is ticking them; reading
+                    // one is taken as the plan only if there is none yet.
+                    let editing = matches!(tool, "Edit" | "MultiEdit" | "Write");
+                    session.consider_plan_file(file, editing);
+                }
+                session.refresh_plan_file();
             }
             // Also covers "the user answered the prompt": work resumed.
             session.set_state(AgentState::Working, now)
@@ -256,6 +276,39 @@ mod tests {
         assert_eq!(s.plan.progress(), Some((0, 2)));
         apply(&mut s, "SessionStart", &json!({ "source": "clear" }), now);
         assert!(s.plan.is_empty());
+    }
+
+    #[test]
+    fn a_markdown_plan_is_followed_as_its_boxes_are_ticked() {
+        let dir = std::env::temp_dir().join(format!("ale-term-planfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("PLAN.md");
+        std::fs::write(&plan, "# Plan\n- [x] One\n- [ ] Two\n- [ ] Three\n").unwrap();
+        std::fs::write(dir.join("README.md"), "no boxes\n").unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+
+        let (mut s, now) = session();
+        apply(&mut s, "UserPromptSubmit", &json!({ "cwd": cwd, "prompt": "implement @PLAN.md step by step" }), now);
+        assert_eq!(s.shown_plan().progress(), Some((1, 3)));
+        assert_eq!(s.shown_plan().current().map(|i| i.text.as_str()), Some("Two"));
+
+        // The agent ticks a box: the next finished tool call sees it.
+        std::fs::write(&plan, "# Plan\n- [x] One\n- [x] Two\n- [ ] Three\n").unwrap();
+        let edit = json!({ "cwd": cwd, "tool_name": "Edit", "tool_input": { "file_path": plan.to_string_lossy() }, "tool_response": {} });
+        apply(&mut s, "PostToolUse", &edit, now);
+        assert_eq!(s.shown_plan().progress(), Some((2, 3)));
+
+        // Editing a Markdown file without boxes does not replace it.
+        let readme = json!({ "tool_name": "Edit", "tool_input": { "file_path": dir.join("README.md").to_string_lossy() } });
+        apply(&mut s, "PostToolUse", &readme, now);
+        assert_eq!(s.shown_plan().progress(), Some((2, 3)));
+
+        // The agent's own to-do list, once it has one, comes first.
+        let todos = json!({ "tool_name": "TodoWrite", "tool_input": { "todos": [{ "content": "Own step", "status": "in_progress" }] }, "tool_response": {} });
+        apply(&mut s, "PostToolUse", &todos, now);
+        assert_eq!(s.shown_plan().progress(), Some((0, 1)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

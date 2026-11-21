@@ -288,14 +288,27 @@ with how long ago each began. The actions come from the status hooks, so
 Claude Code and Kiro with hooks installed show them. A click puts the card
 away.
 
-**Plans**: when an agent works through a to-do list (Claude Code keeps one
-with its TodoWrite or task tools, for instance when you give it a plan to
-implement), its sidebar row and board card show the item in progress
-instead of the tool it is using, with how far along it is ("2/5"); board
-cards also get a progress bar along their bottom edge. The summary card
-lists the plan: ✓ done, ▸ in progress, ○ still to do. This comes from the
-status hooks, so it needs Claude Code's hooks installed; a new or cleared
-conversation starts without a plan.
+**Plans**: when an agent works through a list of tasks, its sidebar row
+and board card show the item in progress instead of the tool it is using,
+with how far along it is ("2/5"); board cards also get a progress bar along
+their bottom edge. The summary card lists the plan: ✓ done, ▸ in progress,
+○ still to do. Two kinds of list are followed, through the status hooks:
+
+- **The agent's own to-do list**: Claude Code's TodoWrite or task tools,
+  and Kiro's `todo_list` or task tool. Kiro works through its list in
+  order, so its first task not done counts as the one in progress.
+- **A Markdown plan file** with checkboxes, for any agent: `- [ ]` to do,
+  `- [x]` done, and `- [-]` (or `- [~]`, `- [/]`) in progress; otherwise the
+  first box not ticked is the current item. The file is the one named in
+  the prompt (`implement @PLAN.md`, `.kiro/specs/x/tasks.md`), or a
+  Markdown file with checkboxes the agent edits (or reads, when it has no
+  plan yet). It is read again after each tool the agent uses, so ticking a
+  box shows at once; ask the agent to tick each box as it finishes it.
+
+The agent's own list comes first when it has one. A new or cleared
+conversation starts without a plan. Kiro's to-do tools follow its
+published tool descriptions and have not been tried in a live Kiro
+session.
 
 **Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
 Working, Done and Idle. Click a card, or move with the arrow keys and press

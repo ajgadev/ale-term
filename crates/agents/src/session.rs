@@ -212,6 +212,9 @@ pub struct Session {
     pub recent: VecDeque<(Instant, String)>,
     /// The to-do list the agent keeps while working through a task.
     pub plan: crate::plan::Plan,
+    /// A Markdown file of checkboxes the agent is working through, and
+    /// the plan read from it.
+    pub plan_file: Option<(PathBuf, crate::plan::Plan)>,
     last_output: Option<Instant>,
     /// Output before this moment is a reaction to something the user or
     /// the terminal did (typing, resizing, switching windows), not work.
@@ -256,6 +259,7 @@ impl Session {
             hooked: false,
             recent: VecDeque::new(),
             plan: crate::plan::Plan::default(),
+            plan_file: None,
             last_output: None,
             settle_until: None,
             burst: None,
@@ -374,6 +378,42 @@ impl Session {
 
     pub(crate) fn set_activity(&mut self, activity: impl Into<String>) {
         self.activity = Some(clean(&activity.into(), 120));
+    }
+
+    /// The plan to show: the agent's own to-do list, or else the plan
+    /// file it is working through.
+    pub fn shown_plan(&self) -> &crate::plan::Plan {
+        static NONE: crate::plan::Plan = crate::plan::Plan { items: Vec::new() };
+        if !self.plan.is_empty() {
+            return &self.plan;
+        }
+        self.plan_file.as_ref().map_or(&NONE, |(_, plan)| plan)
+    }
+
+    /// `path` (relative to the session's folder) may be the plan being
+    /// followed. It becomes the plan file if it has checkboxes, and when
+    /// `replace`, even if another was already chosen.
+    pub(crate) fn consider_plan_file(&mut self, path: &str, replace: bool) {
+        if self.plan_file.is_some() && !replace {
+            return;
+        }
+        let path = std::path::Path::new(path);
+        let path = match (&self.cwd, path.is_absolute()) {
+            (Some(cwd), false) => cwd.join(path),
+            _ => path.to_path_buf(),
+        };
+        if let Some(plan) = crate::plan::Plan::from_file(&path) {
+            self.plan_file = Some((path, plan));
+        }
+    }
+
+    /// Reads the plan file again, for boxes ticked since.
+    pub(crate) fn refresh_plan_file(&mut self) {
+        if let Some((path, plan)) = &mut self.plan_file
+            && let Some(read) = crate::plan::Plan::from_file(path)
+        {
+            *plan = read;
+        }
     }
 
     /// Remembers an action of the main agent for its summary. The same
