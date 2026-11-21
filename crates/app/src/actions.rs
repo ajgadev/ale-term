@@ -28,6 +28,8 @@ pub enum Action {
     NewAgentSession,
     ShowArchive,
     ClearArchive,
+    /// The screen of usage statistics.
+    ShowUsage,
     NextAttention,
     SetUpHooks,
     RemoveHooks,
@@ -84,6 +86,7 @@ pub const COMMANDS: &[(Action, &str, &str)] = &[
     (Action::NewAgentSession, "New Agent Session", "⇧⌘T"),
     (Action::ShowArchive, "Resume Archived Session", ""),
     (Action::ClearArchive, "Clear Session Archive", ""),
+    (Action::ShowUsage, "Agent Usage", "⌥⌘U"),
     (Action::NextAttention, "Go to Next Agent That Needs You", "⇧⌘A"),
     (Action::SetUpHooks, "Set Up Claude Code Status Hooks", ""),
     (Action::RemoveHooks, "Remove Claude Code Status Hooks", ""),
@@ -179,6 +182,7 @@ pub fn from_key(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Optio
         "f" if ctrl => Action::ToggleFullscreen,
         "f" => Action::Find,
         "g" if alt => Action::ToggleGraph,
+        "u" if alt => Action::ShowUsage,
         "g" if shift => Action::FindPrevious,
         "g" => Action::FindNext,
         "p" if shift => Action::CommandPalette,
@@ -270,6 +274,7 @@ mod tests {
         assert_eq!(key("p", cmd), Some(Action::SwitchWorkspace));
         assert_eq!(key("w", cmd | ModifiersState::SHIFT), Some(Action::CloseTab));
         assert_eq!(key("f", cmd | ModifiersState::CONTROL), Some(Action::ToggleFullscreen));
+        assert_eq!(key("u", cmd | ModifiersState::ALT), Some(Action::ShowUsage));
         assert_eq!(key("1", cmd), Some(Action::SelectTab(0)));
         assert_eq!(key("9", cmd), Some(Action::SelectTab(8)));
         // Without Cmd, letters are ordinary typing.

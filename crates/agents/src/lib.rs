@@ -14,6 +14,7 @@ pub mod install;
 pub mod plan;
 pub mod session;
 pub mod transcript;
+pub mod usage;
 
 pub use archive::{Archive, ArchivedSession};
 pub use channel::{HookMessage, Server};

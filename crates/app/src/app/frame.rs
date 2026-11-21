@@ -337,6 +337,10 @@ impl App {
                     crate::menu::draw(renderer, menu, window, scale, palette);
                 }
             }
+            Overlay::Usage => {
+                let top = TabBar::height(scale);
+                crate::usage::draw(renderer, &self.usage.view(pointer), window, scale, top, palette);
+            }
             Overlay::None => {}
         }
     }

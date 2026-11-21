@@ -27,6 +27,7 @@ mod preview;
 mod sidebar;
 mod start;
 mod summary;
+mod usage;
 mod workspace;
 
 use std::path::PathBuf;

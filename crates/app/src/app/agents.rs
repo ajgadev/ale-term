@@ -185,6 +185,8 @@ impl App {
     /// archive. Sessions that never did anything (say, `claude --version`)
     /// are not worth keeping.
     pub(super) fn archive_agent(&mut self, pane_id: PaneId) {
+        // Work in progress ends with the session.
+        self.journal_activity(pane_id, true);
         let Some(pane) = self.panes.get_mut(&pane_id) else { return };
         let Some(session) = pane.agent.take() else { return };
         if !session.hooked && session.title.is_none() {
@@ -282,6 +284,7 @@ impl App {
     /// Reacts to a change in an agent's session: redraw, and alert the user
     /// when it wants them and they are not already looking at it.
     pub(super) fn agent_changed(&mut self, pane_id: PaneId, change: Change) {
+        self.journal_activity(pane_id, false);
         match change {
             Change::None => return,
             Change::Updated | Change::Ended => {}

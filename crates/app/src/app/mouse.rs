@@ -103,6 +103,14 @@ impl App {
             return;
         }
 
+        // The usage screen takes every click.
+        if matches!(self.overlay, Overlay::Usage) {
+            if mouse_button == MouseButton::Left {
+                self.usage_click(x, y);
+            }
+            return;
+        }
+
         // An open palette takes every click: on a row runs it, elsewhere
         // closes the palette.
         // The board: a click on a card goes to that agent; a click on the
@@ -462,6 +470,10 @@ impl App {
         if matches!(self.overlay, Overlay::Menu(_)) {
             self.menu_hover(x, y);
         }
+        // The usage screen lights up what is under the pointer.
+        if matches!(self.overlay, Overlay::Usage) {
+            self.redraw();
+        }
         // The tabs sit in the window's title bar, where the system would
         // take a drag to move the window: over a tab, and while one is
         // being dragged, the window stays put.
@@ -509,6 +521,7 @@ impl App {
                 return hand(layout.setting_at(x, y).is_some());
             }
             Overlay::Confirm(_) => return CursorIcon::Default,
+            Overlay::Usage => return hand(self.usage_hit(x, y).is_some_and(|hit| hit.clickable())),
             Overlay::Board { .. } => {
                 let area = self.content_rect();
                 if area.contains(x, y) {

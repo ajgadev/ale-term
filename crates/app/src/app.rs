@@ -16,10 +16,11 @@ mod overlays;
 mod start_page;
 mod summary_panel;
 mod tab_rename;
+mod usage_panel;
 mod workspaces;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,8 @@ pub enum UserEvent {
     FilesChosen(TabId, Vec<PathBuf>),
     /// The folder picked for a start page's session, for that tab.
     FolderChosen(TabId, PathBuf),
+    /// The usage totals, after reading what is new in the agents' records.
+    UsageScanned(Box<ale_agents::usage::Store>),
 }
 
 struct Pane {
@@ -88,6 +91,8 @@ struct Pane {
     created: Instant,
     /// The coding agent running here, if any.
     agent: Option<ale_agents::Session>,
+    /// What of that agent's work has been written to the usage journal.
+    activity: usage_panel::Activity,
 }
 
 struct Tab {
@@ -213,6 +218,7 @@ pub struct App {
     sidebar: agents::SidebarState,
     graph: graph_panel::GraphState,
     dock: dock_panel::DockState,
+    usage: usage_panel::UsageState,
     /// Claude Code's settings already contain our status hooks.
     claude_hooks: bool,
     /// The user said no to installing them.
@@ -300,6 +306,7 @@ impl App {
             sidebar: agents::SidebarState { visible: sidebar_visible, ..Default::default() },
             graph: graph_panel::GraphState::default(),
             dock: dock_panel::DockState::default(),
+            usage: usage_panel::UsageState::default(),
             claude_hooks: false,
             hooks_declined: false,
             kiro_hooks: false,
@@ -534,6 +541,7 @@ impl App {
                     pending_input: None,
                     created: Instant::now(),
                     agent: None,
+                    activity: usage_panel::Activity::default(),
                 };
                 self.panes.insert(id, pane);
                 Some(id)
@@ -794,6 +802,7 @@ impl App {
                 self.archive.clear();
                 self.redraw();
             }
+            Action::ShowUsage => self.toggle_usage(),
             Action::NextAttention => self.next_attention(),
             Action::SetUpHooks => self.offer_hooks(ale_agents::AgentKind::Claude),
             Action::RemoveHooks => self.remove_hooks(ale_agents::AgentKind::Claude),
@@ -1078,6 +1087,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::FilesListed(directory, files) => self.files_listed(&directory, files),
             UserEvent::FilesChosen(tab, files) => self.files_chosen(tab, files),
             UserEvent::FolderChosen(tab, folder) => self.start_set_folder(tab, folder),
+            UserEvent::UsageScanned(store) => self.usage_scanned(*store),
         }
     }
 

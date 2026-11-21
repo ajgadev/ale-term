@@ -88,6 +88,8 @@ pub enum Overlay {
     },
     /// A dropdown menu under a button.
     Menu(Box<crate::menu::Menu>),
+    /// The screen of usage statistics; the app holds what it shows.
+    Usage,
     /// The board of agents, with the selected card's column and row.
     Board {
         selected: (usize, usize),
@@ -114,6 +116,7 @@ impl Overlay {
                 | Overlay::Confirm(_)
                 | Overlay::Settings { .. }
                 | Overlay::Menu(_)
+                | Overlay::Usage
         )
     }
 
@@ -124,7 +127,7 @@ impl Overlay {
                 Some(query)
             }
             Overlay::Settings { editing, .. } => editing.as_mut(),
-            Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } | Overlay::Menu(_) => None,
+            Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } | Overlay::Menu(_) | Overlay::Usage => None,
         }
     }
 }

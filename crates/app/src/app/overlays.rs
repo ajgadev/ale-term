@@ -13,6 +13,9 @@ impl App {
         if matches!(self.overlay, Overlay::Settings { .. }) && self.settings_key(event) {
             return;
         }
+        if matches!(self.overlay, Overlay::Usage) && self.usage_key(event) {
+            return;
+        }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => return self.close_overlay(),
             Key::Named(NamedKey::Enter) => return self.overlay_confirm(shift, event_loop),
@@ -48,7 +51,13 @@ impl App {
             Some(action @ (Action::FindNext | Action::FindPrevious | Action::Quit)) => {
                 self.perform(action, event_loop);
             }
-            Some(Action::CommandPalette | Action::Find | Action::SwitchWorkspace | Action::ToggleBoard) => {
+            Some(
+                Action::CommandPalette
+                | Action::Find
+                | Action::SwitchWorkspace
+                | Action::ToggleBoard
+                | Action::ShowUsage,
+            ) => {
                 self.close_overlay()
             }
             Some(_) => {}
@@ -81,6 +90,7 @@ impl App {
             | Overlay::Confirm(_)
             | Overlay::Board { .. }
             | Overlay::Menu(_)
+            | Overlay::Usage
             | Overlay::Settings { .. } => {}
         }
         self.redraw();
@@ -108,7 +118,11 @@ impl App {
                 }
                 self.redraw();
             }
-            Overlay::Settings { .. } | Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
+            Overlay::Settings { .. }
+            | Overlay::None
+            | Overlay::Input { .. }
+            | Overlay::Confirm(_)
+            | Overlay::Usage => {}
         }
     }
 
@@ -140,7 +154,7 @@ impl App {
                 let index = menu.selected;
                 self.menu_choose(index, event_loop);
             }
-            Overlay::Settings { .. } | Overlay::None => {}
+            Overlay::Settings { .. } | Overlay::Usage | Overlay::None => {}
         }
     }
 

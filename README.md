@@ -134,6 +134,8 @@ of its name. In the shortcuts, ⌘ is Command, ⇧ Shift, ⌥ Option and ⌃ Con
 | Settings | `⌘,` |
 | Open Settings File |  |
 | Quit ale-term | `⌘Q` |
+| **Other** | |
+| Agent Usage | `⌥⌘U` |
 
 <!-- commands:end -->
 
@@ -450,11 +452,15 @@ What it stores, all under `~/.config/ale-term/`:
 | `state/session.json` | Open workspaces, tabs, splits, folders and running command lines, for restoring |
 | `state/archive.json` | Ended agent sessions: task name, agent, folder, session id |
 | `state/approved.json` | Per-project template files you allowed to run |
+| `state/usage.json` | Usage totals per hour, agent, project folder and model (numbers only), and how far each agent record has been read |
+| `state/activity.jsonl` | For Kiro and OpenCode, whose records it cannot read: when each stretch of work in an ale-term pane ended, how long it lasted and in which folder |
 | `shell-integration/` | The zsh script it loads |
 
 Nothing a terminal or an agent printed is ever written to disk. It reads
 Claude Code's own conversation files under `~/.claude` to show a subagent's
-output. It writes to `~/.claude/settings.json`, or creates
+output and, when you open Agent Usage, reads those files and the session
+records of Codex (`~/.codex/sessions`) and Gemini CLI (`~/.gemini/tmp`) to
+count tokens, tasks and working time; only the counts are kept. It writes to `~/.claude/settings.json`, or creates
 `~/.kiro/hooks/ale-term.json`, only if you ask it to install that agent's
 status hooks.
 
