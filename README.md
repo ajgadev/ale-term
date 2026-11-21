@@ -152,7 +152,11 @@ name and press Enter (Esc keeps the old one; an empty name brings back the
 automatic title). Rest the pointer on a tab whose title is cut short and the title
 slowly scrolls by, so all of it can be read. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
-address or file path to open it.
+address or file path to open it. While Cmd is held over a link, where it
+really leads is shown at the bottom of the window. Programs, scripts,
+installers and shortcut files are shown in the Finder instead of being
+opened, so a link in a terminal cannot run anything; `file://` links to
+other machines are ignored.
 
 ## Command line
 

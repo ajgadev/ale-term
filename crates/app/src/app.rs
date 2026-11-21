@@ -1385,13 +1385,17 @@ fn write_bmp(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> st
     std::fs::write(path, out)
 }
 
-/// Opens a link with the system's default app. The target is passed as a
-/// single argument, never through a shell.
+/// Opens a link with the system's default app, or shows it in the Finder
+/// when opening it would run a program (text in a terminal can link to
+/// anything). The target is passed as a single argument, never through a
+/// shell.
 fn open_target(target: &Target) {
     let mut command = std::process::Command::new("open");
-    match target {
-        Target::Url(url) => command.arg(url),
-        Target::File(path) => command.arg(path),
+    match links::opening(target) {
+        Some(links::Opening::Url(url)) => command.arg(url),
+        Some(links::Opening::Open(path)) => command.arg(path),
+        Some(links::Opening::Reveal(path)) => command.arg("-R").arg(path),
+        None => return,
     };
     if let Err(e) = command.spawn() {
         log::warn!("cannot open link: {e}");

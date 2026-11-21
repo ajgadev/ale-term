@@ -23,6 +23,94 @@ pub struct Link {
     pub target: Target,
 }
 
+/// What clicking a link does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Opening {
+    /// Hand a web or mail address to the system.
+    Url(String),
+    /// Open a file or folder with its default app.
+    Open(PathBuf),
+    /// Only show the file in the Finder: opening it would run it.
+    Reveal(PathBuf),
+}
+
+impl Opening {
+    /// What to tell the user before they click.
+    pub fn describe(&self) -> String {
+        match self {
+            Opening::Url(url) => url.clone(),
+            Opening::Open(path) => path.display().to_string(),
+            Opening::Reveal(path) => format!("Show in Finder (not run): {}", path.display()),
+        }
+    }
+}
+
+/// Kinds of file that the system runs, installs or follows somewhere else
+/// when opened, by extension.
+const RUNS: [&str; 26] = [
+    "app", "command", "tool", "terminal", "pkg", "mpkg", "dmg", "workflow", "action", "scpt", "scptd",
+    "applescript", "jar", "inetloc", "webloc", "fileloc", "url", "prefpane", "saver", "shortcut", "osax",
+    "service", "kext", "plugin", "bundle", "appex",
+];
+
+/// Whether opening `path` would run something rather than show it: a
+/// program, script, installer or shortcut by its extension, or a file
+/// with no extension that is marked executable (the system runs those in
+/// a terminal).
+pub fn runs_when_opened(path: &Path, is_dir: bool, executable: bool) -> bool {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => RUNS.contains(&extension.to_ascii_lowercase().as_str()),
+        None => executable && !is_dir,
+    }
+}
+
+/// The local file a `file://` address names. `None` for another machine's
+/// files (opening those would connect to it) and for anything malformed.
+pub fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let (host, path) = rest.split_at(rest.find('/')?);
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        return None;
+    }
+    let path = path.split(['?', '#']).next()?;
+    // Undo %XX escapes.
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut rest = path.as_bytes();
+    while let [first, tail @ ..] = rest {
+        if *first == b'%' {
+            let hex = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(*first);
+            rest = tail;
+        }
+    }
+    if bytes.contains(&0) {
+        return None;
+    }
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// Decides what clicking `target` does, looking at the file it names.
+/// `None` when it should do nothing.
+pub fn opening(target: &Target) -> Option<Opening> {
+    let path = match target {
+        Target::Url(url) if url.starts_with("file://") => file_url_path(url)?,
+        Target::Url(url) => return Some(Opening::Url(url.clone())),
+        Target::File(path) => path.clone(),
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(&path).ok()?;
+    let executable = metadata.permissions().mode() & 0o111 != 0;
+    Some(if runs_when_opened(&path, metadata.is_dir(), executable) {
+        Opening::Reveal(path)
+    } else {
+        Opening::Open(path)
+    })
+}
+
 /// URL schemes we are willing to open. Deliberately short: opening arbitrary
 /// schemes from terminal output could launch arbitrary apps.
 const SCHEMES: [&str; 4] = ["https://", "http://", "file://", "mailto:"];
@@ -140,6 +228,33 @@ pub fn path_at(chars: &[char], at: usize, cwd: Option<&Path>, exists: impl Fn(&P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_are_shown_not_run() {
+        let runs = |path: &str, is_dir, executable| runs_when_opened(Path::new(path), is_dir, executable);
+        assert!(runs("/tmp/setup.command", false, true));
+        assert!(runs("/Applications/Evil.APP", true, true));
+        assert!(runs("/tmp/installer.pkg", false, false));
+        assert!(runs("/usr/local/bin/tool", false, true));
+        // Sources and documents open as usual, executable bit or not, and
+        // so do folders.
+        assert!(!runs("/repo/build.sh", false, true));
+        assert!(!runs("/repo/src/main.rs", false, false));
+        assert!(!runs("/repo/Makefile", false, false));
+        assert!(!runs("/repo/src", true, true));
+    }
+
+    #[test]
+    fn file_addresses_name_local_files_only() {
+        let path = |url| file_url_path(url);
+        assert_eq!(path("file:///tmp/a%20b.txt"), Some(PathBuf::from("/tmp/a b.txt")));
+        assert_eq!(path("file://localhost/etc/hosts"), Some(PathBuf::from("/etc/hosts")));
+        assert_eq!(path("file:///tmp/x.html#top"), Some(PathBuf::from("/tmp/x.html")));
+        assert_eq!(path("file://evil.example/share/x"), None);
+        assert_eq!(path("file:///tmp/%zz"), None);
+        assert_eq!(path("file:///tmp/a%00b"), None);
+        assert_eq!(path("https://example.com/"), None);
+    }
 
     fn chars(text: &str) -> Vec<char> {
         text.chars().collect()

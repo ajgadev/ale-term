@@ -176,6 +176,8 @@ impl App {
             Overlay::Menu(menu) => Some(menu),
             _ => None,
         };
+        let link_note =
+            self.hover_link.as_ref().and_then(|link| links::opening(&link.target)).map(|opening| opening.describe());
         let focused_pane = self.focused_pane_id();
         let scale = self.scale();
         let padding = self.padding();
@@ -265,6 +267,24 @@ impl App {
         }
         if let Some((rect, model, scroll)) = &sidebar {
             crate::sidebar::draw(renderer, model, *rect, scale, *scroll, palette);
+        }
+        // Where the link under the pointer leads, at the bottom of the
+        // panes: what a link says and where it goes can differ.
+        if let Some(note) = &link_note {
+            let line = scale.round().max(1.0);
+            let pad = (8.0 * scale).round();
+            let room = ((content.w - pad * 4.0) / metrics.width).floor().max(0.0) as usize;
+            let mut text: String = note.chars().take(room).collect();
+            if note.chars().count() > room && room > 0 {
+                text.pop();
+                text.push('…');
+            }
+            let width = renderer.text_width(&text) + pad * 2.0;
+            let height = metrics.height + pad;
+            let (x, y) = (content.x, content.y + content.h - height);
+            renderer.rect(x, y - line, width + line, height + line, color(palette.border));
+            renderer.rect(x, y, width, height, color(palette.chrome));
+            renderer.text(&text, false, x + pad, y + (pad / 2.0).round(), width, color(palette.foreground));
         }
         // The picture for the mention under the pointer, in a thin frame.
         if let Some(preview) = &self.hover_preview {

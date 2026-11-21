@@ -51,8 +51,12 @@ impl App {
         channel::remove_stale_sockets(&state_dir);
         crate::preview::remove_old_pastes(&crate::preview::paste_dir());
         let path = channel::socket_path(&state_dir);
+        // The sockets' folder is for this user only, so no one else can
+        // reach a socket even in the moment before it is locked down.
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir);
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
         // Socket paths are limited to about 100 characters. If the state
         // folder is too deep for that, use the temporary folder instead;

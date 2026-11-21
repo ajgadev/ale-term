@@ -31,8 +31,20 @@ pub struct GraphState {
 
 /// Only conversation records under the agent's own folder are read. The
 /// path comes from a hook message, which any local process could forge.
+///
+/// Both sides are resolved first, so neither `..` nor a link inside the
+/// folder can lead out of it.
 fn readable(path: &Path) -> bool {
-    std::env::var_os("HOME").is_some_and(|home| path.starts_with(Path::new(&home).join(".claude")))
+    let Some(home) = std::env::var_os("HOME") else { return false };
+    inside(path, &Path::new(&home).join(".claude"))
+}
+
+/// Whether the existing file `path` really lies within `folder`.
+fn inside(path: &Path, folder: &Path) -> bool {
+    match (path.canonicalize(), folder.canonicalize()) {
+        (Ok(path), Ok(folder)) => path.starts_with(folder),
+        _ => false,
+    }
 }
 
 impl App {
@@ -230,5 +242,28 @@ impl App {
             self.redraw();
         }
         Some(*self.graph.refresh.get_or_insert(now + Duration::from_millis(1500)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_outside_the_folder_are_not_read() {
+        let base = std::env::temp_dir().join(format!("ale-term-readable-{}", std::process::id()));
+        let folder = base.join("agent");
+        std::fs::create_dir_all(folder.join("projects")).unwrap();
+        std::fs::write(folder.join("projects/a.jsonl"), "").unwrap();
+        std::fs::write(base.join("secret"), "").unwrap();
+        std::os::unix::fs::symlink(base.join("secret"), folder.join("link.jsonl")).unwrap();
+
+        assert!(inside(&folder.join("projects/a.jsonl"), &folder));
+        // Climbing out with `..`, a link pointing out, and a missing file.
+        assert!(!inside(&folder.join("../secret"), &folder));
+        assert!(!inside(&folder.join("projects/../../secret"), &folder));
+        assert!(!inside(&folder.join("link.jsonl"), &folder));
+        assert!(!inside(&folder.join("missing.jsonl"), &folder));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
