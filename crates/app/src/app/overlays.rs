@@ -265,6 +265,7 @@ impl App {
             // So the echo of this typing is not taken for the agent working.
             session.on_input(Instant::now());
         }
+        self.mouse.program_selection = None;
         let Some(pane) = self.focused_pane() else { return };
         {
             let mut term = pane.terminal.lock();
@@ -275,11 +276,25 @@ impl App {
         self.redraw();
     }
 
+    /// Cmd+C: copies the selected text.
+    ///
+    /// A program that takes the mouse does its own selecting, so the
+    /// terminal has none. Claude Code's full-screen mode is such a program,
+    /// and copies its selection on Ctrl+C; when the mouse was just dragged
+    /// across it, Cmd+C sends that. (Without a drag, Ctrl+C would interrupt
+    /// it instead, so nothing is sent.)
     pub(super) fn copy(&mut self) {
-        let Some(pane) = self.focused_pane() else { return };
+        let Some(id) = self.focused_pane_id() else { return };
+        let Some(pane) = self.panes.get(&id) else { return };
         let text = pane.terminal.lock().selection_to_string();
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             set_clipboard(text);
+            return;
+        }
+        let claude = pane.agent.as_ref().is_some_and(|session| session.kind == ale_agents::AgentKind::Claude);
+        if claude && self.mouse.program_selection == Some(id) && self.mouse_reporting(id).is_some() {
+            self.mouse.program_selection = None;
+            pane.terminal.write(&b"\x03"[..]);
         }
     }
 

@@ -120,6 +120,10 @@ struct Mouse {
     hover_tab: Option<TabBarHit>,
     /// The pointer shape last set, so it is only changed when needed.
     cursor: CursorIcon,
+    /// A pane whose program was last sent a drag across cells: a program
+    /// doing its own text selection (Claude Code's full-screen mode)
+    /// probably has some selected.
+    program_selection: Option<PaneId>,
 }
 
 /// A link under the mouse while Cmd is held.
@@ -248,6 +252,7 @@ impl App {
                 last_cell: None,
                 hover_tab: None,
                 cursor: CursorIcon::Default,
+                program_selection: None,
             },
             overlay: Overlay::None,
             last_search: String::new(),

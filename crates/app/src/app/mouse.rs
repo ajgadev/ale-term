@@ -211,6 +211,10 @@ impl App {
         if let Some(mode) = self.mouse_reporting(pane) {
             self.mouse.last_cell = None;
             self.report_mouse(pane, rect, MouseAction::Press, code, mode);
+            // Remember where the press was, to tell a drag from a click.
+            let (column, line, _) = self.cell_at(pane, rect, x, y);
+            self.mouse.last_cell = Some((pane, column, line));
+            self.mouse.program_selection = None;
             if mouse_button == MouseButton::Left {
                 self.mouse.drag = Drag::Reported(pane);
             }
@@ -283,7 +287,11 @@ impl App {
                     && let Some(mode) = self.mouse_reporting(pane)
                     && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
                 {
+                    let before = self.mouse.last_cell;
                     self.report_mouse(pane, rect, MouseAction::Motion, button::LEFT, mode);
+                    if self.mouse.last_cell != before {
+                        self.mouse.program_selection = Some(pane);
+                    }
                 }
             }
             Drag::None => {
