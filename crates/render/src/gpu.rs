@@ -103,6 +103,8 @@ pub struct GpuRenderer {
     instances: Vec<Instance>,
     batches: Vec<Batch>,
     clear: Color,
+    /// Drawing is limited to this box (x, y, width, height), if set.
+    clip: Option<[f32; 4]>,
 
     images: HashMap<u64, ImageTexture>,
     /// Image keys, oldest first, for evicting when over budget.
@@ -291,6 +293,7 @@ impl GpuRenderer {
             char_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
             atlas_rebuilt: false,
+            clip: None,
         };
         renderer.write_globals();
         Ok(renderer)
@@ -329,6 +332,7 @@ impl GpuRenderer {
         self.batches.clear();
         self.clear = clear;
         self.atlas_rebuilt = false;
+        self.clip = None;
     }
 
     /// A solid rectangle.
@@ -339,9 +343,20 @@ impl GpuRenderer {
         self.push(Instance { pos: [x, y], size: [width, height], uv: [0.0; 4], color, kind: KIND_RECT }, None);
     }
 
+    pub fn set_clip(&mut self, clip: Option<[f32; 4]>) {
+        self.clip = clip;
+    }
+
     /// Queues an instance, extending the current batch when it uses the
     /// same texture and starting a new one otherwise.
     fn push(&mut self, instance: Instance, image: Option<u64>) {
+        let instance = match self.clip {
+            Some(clip) => match clipped(instance, clip) {
+                Some(instance) => instance,
+                None => return,
+            },
+            None => instance,
+        };
         let index = self.instances.len() as u32;
         self.instances.push(instance);
         match self.batches.last_mut() {
@@ -738,4 +753,60 @@ fn create_bind_group(
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
         ],
     })
+}
+
+/// The part of `instance` inside `clip` (x, y, width, height), or `None`
+/// when nothing of it is. The texture area shrinks in step with the
+/// rectangle, so a glyph cut in half shows exactly its left or right half.
+/// This works whether `uv` is in atlas pixels or in the 0..1 range.
+fn clipped(instance: Instance, clip: [f32; 4]) -> Option<Instance> {
+    let [x, y] = instance.pos;
+    let [width, height] = instance.size;
+    let left = x.max(clip[0]);
+    let top = y.max(clip[1]);
+    let right = (x + width).min(clip[0] + clip[2]);
+    let bottom = (y + height).min(clip[1] + clip[3]);
+    if left >= right || top >= bottom {
+        return None;
+    }
+    if (left, top, right, bottom) == (x, y, x + width, y + height) {
+        return Some(instance);
+    }
+    let [u, v, uv_width, uv_height] = instance.uv;
+    let (per_x, per_y) = (uv_width / width, uv_height / height);
+    Some(Instance {
+        pos: [left, top],
+        size: [right - left, bottom - top],
+        uv: [u + (left - x) * per_x, v + (top - y) * per_y, (right - left) * per_x, (bottom - top) * per_y],
+        ..instance
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glyph(x: f32) -> Instance {
+        // A 10x20 glyph stored at (100, 50) in the atlas.
+        Instance { pos: [x, 0.0], size: [10.0, 20.0], uv: [100.0, 50.0, 10.0, 20.0], color: [255; 4], kind: KIND_MASK }
+    }
+
+    #[test]
+    fn clipping_cuts_quads_and_their_texture_alike() {
+        let clip = [0.0, 0.0, 100.0, 100.0];
+        // Inside: untouched. Outside: dropped.
+        assert_eq!(clipped(glyph(20.0), clip).unwrap().pos, [20.0, 0.0]);
+        assert!(clipped(glyph(150.0), clip).is_none());
+        // Crossing the left edge: the right part stays, and shows the
+        // right part of the glyph.
+        let cut = clipped(glyph(-4.0), clip).unwrap();
+        assert_eq!((cut.pos, cut.size, cut.uv), ([0.0, 0.0], [6.0, 20.0], [104.0, 50.0, 6.0, 20.0]));
+        // Crossing the right edge.
+        let cut = clipped(glyph(95.0), clip).unwrap();
+        assert_eq!((cut.pos, cut.size, cut.uv), ([95.0, 0.0], [5.0, 20.0], [100.0, 50.0, 5.0, 20.0]));
+        // Images use 0..1 coordinates; the same proportion applies.
+        let image = Instance { pos: [-50.0, 0.0], size: [200.0, 10.0], uv: [0.0, 0.0, 1.0, 1.0], color: [255; 4], kind: KIND_IMAGE };
+        let cut = clipped(image, clip).unwrap();
+        assert_eq!((cut.size, cut.uv), ([100.0, 10.0], [0.25, 0.0, 0.5, 1.0]));
+    }
 }

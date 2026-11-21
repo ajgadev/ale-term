@@ -56,7 +56,8 @@ Every command is also in the command palette (Shift+Cmd+P).
 
 Mouse: drag to select (double-click a word, triple-click a line), drag the
 line between panes to resize, click the × on a tab (or middle-click it) to
-close it. Hold Shift to
+close it. Rest the pointer on a tab whose title is cut short and the title
+slowly scrolls by, so all of it can be read. Hold Shift to
 select text in programs that capture the mouse. Hold Cmd and click a web
 address or file path to open it.
 

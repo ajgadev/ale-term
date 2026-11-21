@@ -244,24 +244,15 @@ impl TabBar {
             }
             let full_width = r.text_width(&title.text);
             let used = if hovered_tab == Some(index) && full_width > max_width && max_width > metrics.width * 2.0 {
-                // Too long, and the pointer is on it: slide it along. Only
-                // whole letters are drawn, so the ones at either edge come
-                // and go as they reach it.
+                // Too long, and the pointer is on it: slide it along,
+                // clipped to the title's space so letters glide past its
+                // edges. Whole pixels, so glyphs stay crisp.
                 scrolling = true;
                 let speed = SCROLL_SPEED * scale;
-                let offset = scroll_offset(hover_seconds, full_width - max_width, speed);
-                let mut start = 0.0;
-                let mut skip = 0;
-                for c in title.text.chars() {
-                    if start >= offset {
-                        break;
-                    }
-                    start += r.text_width(c.encode_utf8(&mut [0; 4]));
-                    skip += 1;
-                }
-                let shown: String = title.text.chars().skip(skip).collect();
-                let shift = start - offset;
-                r.text(&shown, is_active, x + shift, text_y, max_width - shift, color(text_color));
+                let offset = scroll_offset(hover_seconds, full_width - max_width, speed).round();
+                r.set_clip(Some([x, bar.y, max_width, bar.h]));
+                r.text(&title.text, is_active, x - offset, text_y, full_width, color(text_color));
+                r.set_clip(None);
                 max_width
             } else {
                 let label = fit(&title.text, max_width, metrics.width);

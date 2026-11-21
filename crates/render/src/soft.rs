@@ -45,7 +45,12 @@ struct Command {
     image: u64,
     /// Part of the image to show (x, y, width, height in 0..1).
     uv: [f32; 4],
+    /// Only pixels inside this box are painted: left, top, right, bottom.
+    clip: [i32; 4],
 }
+
+/// A clip box that clips nothing.
+const NO_CLIP: [i32; 4] = [i32::MIN, i32::MIN, i32::MAX, i32::MAX];
 
 /// A rasterized glyph kept in ordinary memory.
 struct Glyph {
@@ -109,6 +114,8 @@ pub struct SoftRenderer {
 
     image_order: VecDeque<u64>,
     image_bytes: usize,
+    /// The clip box applied to commands as they are added.
+    clip: [i32; 4],
 }
 
 fn style_bits(bold: bool, italic: bool) -> u8 {
@@ -154,6 +161,7 @@ impl SoftRenderer {
             cluster_cache: HashMap::new(),
             image_order: VecDeque::new(),
             image_bytes: 0,
+            clip: NO_CLIP,
         };
         renderer.resize(width, height);
         Ok(renderer)
@@ -192,6 +200,20 @@ impl SoftRenderer {
     pub fn begin(&mut self, clear: Color) {
         self.scene.commands.clear();
         self.scene.clear = clear;
+        self.clip = NO_CLIP;
+    }
+
+    pub fn set_clip(&mut self, clip: Option<[f32; 4]>) {
+        // Rounded like rectangle edges, so a clip box lines up with a
+        // rectangle drawn at the same place.
+        self.clip = clip.map_or(NO_CLIP, |[x, y, w, h]| {
+            [x.round() as i32, y.round() as i32, (x + w).round() as i32, (y + h).round() as i32]
+        });
+    }
+
+    fn push(&mut self, mut command: Command) {
+        command.clip = self.clip;
+        self.scene.commands.push(command);
     }
 
     pub fn rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Color) {
@@ -201,7 +223,7 @@ impl SoftRenderer {
         // Round the edges, not the size, so neighbouring rectangles meet.
         let (x0, y0) = (x.round() as i32, y.round() as i32);
         let (x1, y1) = ((x + width).round() as i32, (y + height).round() as i32);
-        self.scene.commands.push(Command {
+        self.push(Command {
             x: x0,
             y: y0,
             w: x1 - x0,
@@ -211,6 +233,7 @@ impl SoftRenderer {
             glyph: 0,
             image: 0,
             uv: [0.0; 4],
+            clip: NO_CLIP,
         });
     }
 
@@ -239,7 +262,7 @@ impl SoftRenderer {
         let (x, y) = (x.round() as i32, y.round() as i32);
         for index in run.start..run.start + run.len {
             let glyph = &self.scene.glyphs[index as usize];
-            self.scene.commands.push(Command {
+            self.push(Command {
                 x: x + glyph.left,
                 y: y + glyph.top,
                 w: glyph.width,
@@ -249,6 +272,7 @@ impl SoftRenderer {
                 glyph: index,
                 image: 0,
                 uv: [0.0; 4],
+                clip: NO_CLIP,
             });
         }
     }
@@ -341,7 +365,7 @@ impl SoftRenderer {
         if width > 0.0 && height > 0.0 && self.scene.images.contains_key(&key) {
             let (x0, y0) = (x.round() as i32, y.round() as i32);
             let (x1, y1) = ((x + width).round() as i32, (y + height).round() as i32);
-            self.scene.commands.push(Command {
+            self.push(Command {
                 x: x0,
                 y: y0,
                 w: x1 - x0,
@@ -351,6 +375,7 @@ impl SoftRenderer {
                 glyph: 0,
                 image: key,
                 uv,
+                clip: NO_CLIP,
             });
         }
     }
@@ -420,9 +445,11 @@ impl Scene {
         }
         let last_band = self.bands.len() as i32 - 1;
         for (index, command) in self.commands.iter().enumerate() {
-            let (top, bottom) = (command.y, command.y + command.h - 1);
-            let off_screen = bottom < 0 || top >= self.height || command.x >= self.width || command.x + command.w <= 0;
-            if command.w <= 0 || command.h <= 0 || off_screen {
+            let [clip_left, clip_top, clip_right, clip_bottom] = command.clip;
+            let (left, right) = (command.x.max(clip_left), (command.x + command.w).min(clip_right));
+            let (top, bottom) = (command.y.max(clip_top), (command.y + command.h).min(clip_bottom) - 1);
+            let off_screen = bottom < 0 || top >= self.height || left >= self.width || right <= 0;
+            if left >= right || top > bottom || off_screen {
                 continue;
             }
             for band in (top.max(0) / BAND)..=(bottom / BAND).min(last_band) {
@@ -443,6 +470,10 @@ impl Scene {
                 hash = mix(hash, (c.x as u32 as u64) << 32 | c.y as u32 as u64);
                 hash = mix(hash, (c.w as u32 as u64) << 32 | c.h as u32 as u64);
                 hash = mix(hash, u32::from_le_bytes(c.color) as u64 | (c.kind as u64) << 32 | (c.glyph as u64) << 40);
+                if c.clip != NO_CLIP {
+                    hash = mix(hash, (c.clip[0] as u32 as u64) << 32 | c.clip[1] as u32 as u64);
+                    hash = mix(hash, (c.clip[2] as u32 as u64) << 32 | c.clip[3] as u32 as u64);
+                }
                 if c.kind == KIND_IMAGE {
                     hash = mix(hash, c.image);
                     hash = mix(hash, (c.uv[0].to_bits() as u64) << 32 | c.uv[1].to_bits() as u64);
@@ -466,9 +497,11 @@ impl Scene {
 
         for &index in &self.bands[band] {
             let c = self.commands[index as usize];
-            // The part of the command inside this band and the window.
-            let (x0, x1) = (c.x.max(0), (c.x + c.w).min(width));
-            let (y0, y1) = (c.y.max(top), (c.y + c.h).min(bottom));
+            // The part of the command inside this band, the window and
+            // its clip box.
+            let [clip_left, clip_top, clip_right, clip_bottom] = c.clip;
+            let (x0, x1) = (c.x.max(0).max(clip_left), (c.x + c.w).min(width).min(clip_right));
+            let (y0, y1) = (c.y.max(top).max(clip_top), (c.y + c.h).min(bottom).min(clip_bottom));
             if x0 >= x1 || y0 >= y1 {
                 continue;
             }
@@ -577,6 +610,46 @@ mod tests {
         assert_ne!(a, mix(mix(1, 3), 2));
         assert_ne!(a, mix(mix(1, 2), 4));
         assert_eq!(a, mix(mix(1, 2), 3));
+    }
+
+    #[test]
+    fn clipped_glyphs_are_cut_at_the_clip_edge() {
+        // A fully covered 8x8 glyph at (6, 4), clipped to x 10..12.
+        let glyph = Glyph { left: 0, top: 0, width: 8, height: 8, color: false, data: vec![255; 64].into_boxed_slice() };
+        let command = Command {
+            x: 6,
+            y: 4,
+            w: 8,
+            h: 8,
+            color: [255, 255, 255, 255],
+            kind: KIND_MASK,
+            glyph: 0,
+            image: 0,
+            uv: [0.0; 4],
+            clip: [10, 0, 12, 40],
+        };
+        let mut scene = Scene {
+            width: 20,
+            height: 40,
+            commands: vec![command],
+            clear: [0, 0, 0, 255],
+            bands: vec![Vec::new(); 2],
+            glyphs: vec![glyph],
+            images: HashMap::new(),
+            epoch: 0,
+        };
+        scene.bucket();
+        let mut pixels = vec![0u32; 20 * 40];
+        for band in 0..scene.bands.len() {
+            scene.paint_band(&mut pixels, 20, band);
+        }
+        let row: Vec<bool> = pixels[6 * 20..7 * 20].iter().map(|p| *p == 0xFF_FF_FF_FF).collect();
+        let painted: Vec<usize> = (0..20).filter(|x| row[*x]).collect();
+        assert_eq!(painted, [10, 11]);
+        // A command entirely outside its clip box touches no band.
+        scene.commands[0].clip = [0, 0, 5, 40];
+        scene.bucket();
+        assert!(scene.bands.iter().all(Vec::is_empty));
     }
 
     #[test]

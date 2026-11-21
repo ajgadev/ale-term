@@ -123,6 +123,14 @@ impl Renderer {
         each!(self, r => r.begin(clear))
     }
 
+    /// Limits what is drawn from now on to the rectangle `x, y, width,
+    /// height` (in pixels), or lifts the limit with `None`. Anything
+    /// crossing its edge is cut there, so text can slide smoothly past it.
+    /// Every frame starts without a limit.
+    pub fn set_clip(&mut self, clip: Option<[f32; 4]>) {
+        each!(self, r => r.set_clip(clip))
+    }
+
     /// A solid rectangle.
     pub fn rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Color) {
         each!(self, r => r.rect(x, y, width, height, color))
