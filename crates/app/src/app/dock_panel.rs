@@ -80,6 +80,7 @@ impl App {
                     // Spins while the agent is busy.
                     icon: self.agent_icon(session),
                     tab: tab.custom_title.clone(),
+                    progress: session.plan.progress(),
                 });
             }
         }

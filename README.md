@@ -288,6 +288,15 @@ with how long ago each began. The actions come from the status hooks, so
 Claude Code and Kiro with hooks installed show them. A click puts the card
 away.
 
+**Plans**: when an agent works through a to-do list (Claude Code keeps one
+with its TodoWrite or task tools, for instance when you give it a plan to
+implement), its sidebar row and board card show the item in progress
+instead of the tool it is using, with how far along it is ("2/5"); board
+cards also get a progress bar along their bottom edge. The summary card
+lists the plan: ✓ done, ▸ in progress, ○ still to do. This comes from the
+status hooks, so it needs Claude Code's hooks installed; a new or cleared
+conversation starts without a plan.
+
 **Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
 Working, Done and Idle. Click a card, or move with the arrow keys and press
 Enter, to jump to that agent.

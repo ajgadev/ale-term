@@ -22,6 +22,11 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
     match event {
         "SessionStart" => {
             session.activity = None;
+            // A new or cleared conversation starts without a plan; one
+            // resumed or compacted keeps it.
+            if !matches!(payload["source"].as_str(), Some("resume" | "compact")) {
+                session.plan.clear();
+            }
             session.set_state(AgentState::Idle, now)
         }
         "UserPromptSubmit" => {
@@ -61,6 +66,11 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
         "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" | "PermissionDenied" | "ElicitationResult" => {
             if payload.get("agent_id").is_some_and(|id| !id.is_null()) {
                 return Change::None;
+            }
+            // The plan follows the to-do tools' successful calls.
+            if event == "PostToolUse" {
+                let tool = payload["tool_name"].as_str().unwrap_or("");
+                session.plan.apply(tool, &payload["tool_input"], &payload["tool_response"]);
             }
             // Also covers "the user answered the prompt": work resumed.
             session.set_state(AgentState::Working, now)
@@ -222,6 +232,30 @@ mod tests {
         // But the agent's own title does.
         apply(&mut s, "PostToolUse", &json!({ "session_title": "Login bug fix" }), now);
         assert_eq!(s.title.as_deref(), Some("Login bug fix"));
+    }
+
+    #[test]
+    fn the_plan_follows_the_to_do_tools_of_the_main_agent() {
+        let (mut s, now) = session();
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "work through the plan" }), now);
+        let todos = json!({ "todos": [
+            { "content": "Add the tests", "activeForm": "Adding the tests", "status": "in_progress" },
+            { "content": "Update the docs", "activeForm": "Updating the docs", "status": "pending" },
+        ]});
+        // Only a successful call counts.
+        apply(&mut s, "PostToolUseFailure", &json!({ "tool_name": "TodoWrite", "tool_input": todos }), now);
+        assert!(s.plan.is_empty());
+        apply(&mut s, "PostToolUse", &json!({ "tool_name": "TodoWrite", "tool_input": todos, "tool_response": {} }), now);
+        assert_eq!(s.plan.progress(), Some((0, 2)));
+        // A subagent's own list is not the agent's plan.
+        let inner = json!({ "agent_id": "a1", "tool_name": "TodoWrite", "tool_input": { "todos": [] } });
+        apply(&mut s, "PostToolUse", &inner, now);
+        assert_eq!(s.plan.progress(), Some((0, 2)));
+        // Compacting keeps it; clearing the conversation drops it.
+        apply(&mut s, "SessionStart", &json!({ "source": "compact" }), now);
+        assert_eq!(s.plan.progress(), Some((0, 2)));
+        apply(&mut s, "SessionStart", &json!({ "source": "clear" }), now);
+        assert!(s.plan.is_empty());
     }
 
     #[test]

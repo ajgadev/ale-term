@@ -68,6 +68,8 @@ pub enum Row {
         current: bool,
         /// Image key of the agent's icon.
         icon: u64,
+        /// Items of its plan done, and in all, when it has one.
+        progress: Option<(usize, usize)>,
     },
     /// A subagent, listed under its agent.
     Subagent {
@@ -468,7 +470,7 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 let text_color = if target { color(palette.accent) } else { dim };
                 r.text(&label, target, rect.x + pad, rect.y + rect.h - metrics.height - gap, rect.w, text_color);
             }
-            Item::Row(Row::Agent { target, state, title, status, agent, elapsed, current, icon }) => {
+            Item::Row(Row::Agent { target, state, title, status, agent, elapsed, current, icon, progress }) => {
                 if !*current && hovered(Hit::Row(*target)) {
                     r.rect(rect.x, rect.y, rect.w - line, rect.h, hover_wash);
                 }
@@ -501,12 +503,20 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 // Working is the normal case and stays quiet; other states
                 // take their color.
                 let status_color = if *state == AgentState::Working { dim } else { state_rgb };
-                let status = fit(status, right - text_x, cell.0);
+                // At the end: how far along its plan is, when it has one
+                // (the icon already says which agent it is), or its name.
+                let (end, end_color) = match progress {
+                    Some((done, total)) => (format!("{done}/{total}"), fg),
+                    None => (agent.clone(), dim),
+                };
+                let end_width = r.text_width(&end);
+                let status_room = if progress.is_some() { right - end_width - cell.0 * 2.0 - text_x } else { right - text_x };
+                let status = fit(status, status_room, cell.0);
                 let used = r.text(&status, false, text_x, second, rect.w, status_color);
-                // The agent's name goes at the end if the status leaves room.
-                let agent_width = r.text_width(agent);
-                if text_x + used + cell.0 * 2.0 + agent_width <= right {
-                    r.text(agent, false, right - agent_width, second, agent_width, dim);
+                // The name goes only if the status leaves room; the
+                // progress always does.
+                if progress.is_some() || text_x + used + cell.0 * 2.0 + end_width <= right {
+                    r.text(&end, false, right - end_width, second, end_width, end_color);
                 }
             }
             Item::Row(Row::Subagent { target, index, text, running }) => {
@@ -633,6 +643,7 @@ mod tests {
             elapsed: "3m".into(),
             current: false,
             icon: 0,
+            progress: None,
         }
     }
 

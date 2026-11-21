@@ -297,14 +297,23 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, lights: boo
         // The workspace, then what it is doing or waiting for.
         let project = fit(&card.project, (inner_width * 0.4).max(cell.0 * 4.0), cell.0);
         let used = r.text(&project, false, inner_x, third, inner_width, dim);
+        // A plan's progress at the end of the line, and as a bar along the
+        // card's bottom edge.
+        let count = card.progress.map(crate::board::progress_text).unwrap_or_default();
+        let count_width = r.text_width(&count);
         let status_x = inner_x + used + cell.0 * 2.0;
-        let status_room = inner_x + inner_width - status_x;
+        let status_end = if count.is_empty() { inner_x + inner_width } else { inner_x + inner_width - count_width - cell.0 * 2.0 };
+        let status_room = status_end - status_x;
         if status_room > cell.0 * 3.0 {
             let status_color = match card.state {
                 AgentState::Working | AgentState::Idle => dim,
                 _ => state,
             };
             r.text(&fit(&card.status, status_room, cell.0), false, status_x, third, status_room, status_color);
+        }
+        if let Some(progress) = card.progress {
+            r.text(&count, false, inner_x + inner_width - count_width, third, count_width, fg);
+            crate::board::draw_progress_bar(r, progress, rect, line, state, border);
         }
     }
 
@@ -337,6 +346,7 @@ mod tests {
             elapsed: "3m".into(),
             icon: 0,
             tab: None,
+            progress: None,
         }
     }
 

@@ -11,6 +11,7 @@ pub mod channel;
 pub mod hooks;
 pub mod hooks_claude;
 pub mod install;
+pub mod plan;
 pub mod session;
 pub mod transcript;
 

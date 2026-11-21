@@ -5,6 +5,7 @@
 //! draws it.
 
 use ale_agents::AgentState;
+use ale_agents::plan::{ItemStatus, Plan};
 use ale_config::Palette;
 use ale_render::Renderer;
 
@@ -34,12 +35,18 @@ pub struct Summary {
     pub actions: Vec<(String, String)>,
     /// Its status comes from hooks; without them nothing is recorded.
     pub hooked: bool,
+    /// The to-do list it is working through, if any.
+    pub plan: Plan,
 }
 
 /// Width of the card, in text columns.
 const COLUMNS: usize = 54;
 /// At most this many lines of the last message.
 const MESSAGE_LINES: usize = 4;
+/// At most this many items of a plan, around the one in progress.
+const PLAN_ITEMS: usize = 8;
+/// With a plan to show, fewer of the latest actions.
+const ACTIONS_WITH_PLAN: usize = 3;
 
 /// The card's lines, top to bottom.
 #[derive(Debug, PartialEq)]
@@ -52,10 +59,42 @@ enum Line {
     Message(String),
     Action(String, String),
     Note(&'static str),
+    /// "Plan", with how many items are done.
+    PlanHeading(usize, usize),
+    PlanItem(ItemStatus, String),
+    /// Items of the plan not shown, before or after those listed.
+    PlanMore(usize),
+}
+
+/// The plan's lines: a window of items around the one in progress (or the
+/// first not done), with a note for those left out on either side.
+fn plan_lines(plan: &Plan) -> Vec<Line> {
+    let Some((done, total)) = plan.progress() else { return Vec::new() };
+    let focus = plan
+        .items
+        .iter()
+        .position(|item| item.status == ItemStatus::InProgress)
+        .or_else(|| plan.items.iter().position(|item| item.status != ItemStatus::Done))
+        .unwrap_or(total.saturating_sub(1));
+    let start = focus.saturating_sub(2).min(total.saturating_sub(PLAN_ITEMS));
+    let end = (start + PLAN_ITEMS).min(total);
+    let mut lines = vec![Line::Divider, Line::PlanHeading(done, total)];
+    if start > 0 {
+        lines.push(Line::PlanMore(start));
+    }
+    for item in &plan.items[start..end] {
+        let text = if item.status == ItemStatus::InProgress { item.label() } else { item.text.as_str() };
+        lines.push(Line::PlanItem(item.status, text.to_owned()));
+    }
+    if end < total {
+        lines.push(Line::PlanMore(total - end));
+    }
+    lines
 }
 
 fn lines(summary: &Summary) -> Vec<Line> {
     let mut lines = vec![Line::Header, Line::Title, Line::Status];
+    lines.extend(plan_lines(&summary.plan));
     if let Some(message) = summary.message.as_deref().filter(|m| !m.is_empty()) {
         lines.push(Line::Divider);
         lines.push(Line::Label("Last message"));
@@ -75,9 +114,10 @@ fn lines(summary: &Summary) -> Vec<Line> {
     if !summary.actions.is_empty() {
         lines.push(Line::Divider);
         lines.push(Line::Label("Latest actions"));
-        lines.extend(summary.actions.iter().map(|(action, age)| Line::Action(action.clone(), age.clone())));
+        let shown = if summary.plan.is_empty() { summary.actions.len() } else { ACTIONS_WITH_PLAN };
+        lines.extend(summary.actions.iter().take(shown).map(|(action, age)| Line::Action(action.clone(), age.clone())));
     }
-    if summary.message.is_none() && summary.actions.is_empty() {
+    if summary.message.is_none() && summary.actions.is_empty() && summary.plan.is_empty() {
         lines.push(Line::Divider);
         lines.push(Line::Note(if summary.hooked {
             "Nothing done yet in this session."
@@ -205,6 +245,25 @@ pub fn draw(r: &mut Renderer, summary: &Summary, pointer: (f32, f32), window: (f
             Line::Note(note) => {
                 r.text(note, false, left, text_y, width, dim);
             }
+            Line::PlanHeading(done, total) => {
+                let used = r.text("Plan", true, left, text_y, width, color(palette.accent));
+                let count = format!("  {done} of {total} done");
+                r.text(&count, false, left + used, text_y, width - used, dim);
+            }
+            Line::PlanItem(status, text) => {
+                let (mark, mark_ink, text_ink, bold) = match status {
+                    ItemStatus::Done => ("✓", color(palette.ansi[2]), dim, false),
+                    ItemStatus::InProgress => ("▸", color(palette.accent), fg, true),
+                    ItemStatus::Pending => ("○", dim, fg, false),
+                };
+                r.text(mark, false, left, text_y, cell.0 * 2.0, mark_ink);
+                let room = width - cell.0 * 2.0;
+                r.text(&fit(text, room, cell.0), bold, left + cell.0 * 2.0, text_y, room, text_ink);
+            }
+            Line::PlanMore(count) => {
+                let text = if *count == 1 { "  … 1 more".to_owned() } else { format!("  … {count} more") };
+                r.text(&text, false, left, text_y, width, dim);
+            }
         }
         y += height;
     }
@@ -229,6 +288,7 @@ mod tests {
             message: Some("Updated the pricing cards so they share one height. ".repeat(6)),
             actions: vec![("Running npm test".into(), "2m".into()), ("Editing pricing.css".into(), "3m".into())],
             hooked: true,
+            plan: Plan::default(),
         }
     }
 
@@ -249,6 +309,27 @@ mod tests {
         assert!(lines(&quiet).contains(&Line::Note("Nothing done yet in this session.")));
         quiet.hooked = false;
         assert!(lines(&quiet).contains(&Line::Note("Set up its status hooks to see what it did.")));
+    }
+
+    #[test]
+    fn a_long_plan_shows_the_items_around_the_one_in_progress() {
+        use ale_agents::plan::PlanItem;
+        let item = |n: usize, status| PlanItem { id: n.to_string(), text: format!("step {n}"), active: None, status };
+        let mut with_plan = summary();
+        with_plan.plan.items = (1..=12)
+            .map(|n| item(n, if n < 7 { ItemStatus::Done } else if n == 7 { ItemStatus::InProgress } else { ItemStatus::Pending }))
+            .collect();
+        let lines = lines(&with_plan);
+        assert!(lines.contains(&Line::PlanHeading(6, 12)));
+        let items: Vec<&String> = lines.iter().filter_map(|l| if let Line::PlanItem(_, t) = l { Some(t) } else { None }).collect();
+        assert_eq!(items.len(), PLAN_ITEMS);
+        assert_eq!(items[0], "step 5");
+        assert!(lines.contains(&Line::PlanItem(ItemStatus::InProgress, "step 7".into())));
+        // The four done before them are summed up; nothing is left after.
+        let more: Vec<&Line> = lines.iter().filter(|l| matches!(l, Line::PlanMore(_))).collect();
+        assert_eq!(more, [&Line::PlanMore(4)]);
+        // With a plan, fewer actions.
+        assert_eq!(lines.iter().filter(|l| matches!(l, Line::Action(..))).count(), 2.min(ACTIONS_WITH_PLAN));
     }
 
     #[test]

@@ -210,6 +210,8 @@ pub struct Session {
     /// The main agent's latest actions ("Editing src/main.rs"), oldest
     /// first, with when each began; at most [`RECENT_ACTIONS`].
     pub recent: VecDeque<(Instant, String)>,
+    /// The to-do list the agent keeps while working through a task.
+    pub plan: crate::plan::Plan,
     last_output: Option<Instant>,
     /// Output before this moment is a reaction to something the user or
     /// the terminal did (typing, resizing, switching windows), not work.
@@ -253,6 +255,7 @@ impl Session {
             pending_launches: VecDeque::new(),
             hooked: false,
             recent: VecDeque::new(),
+            plan: crate::plan::Plan::default(),
             last_output: None,
             settle_until: None,
             burst: None,

@@ -467,6 +467,13 @@ impl App {
 
     pub(super) fn agent_status(session: &Session) -> String {
         let label = session.state.label();
+        // Working through a plan, the item in progress says more than the
+        // tool it happens to be using.
+        if matches!(session.state, AgentState::Working | AgentState::Waiting)
+            && let Some(item) = session.plan.current()
+        {
+            return item.label().to_owned();
+        }
         match (session.state, &session.activity) {
             (AgentState::Working | AgentState::NeedsYou | AgentState::Waiting, Some(activity)) => {
                 activity.clone()
@@ -533,6 +540,7 @@ impl App {
                     elapsed: shown_elapsed(session, now),
                     current,
                     icon: self.agent_icon(session),
+                    progress: session.plan.progress(),
                 }];
                 for (index, subagent) in session.subagents.iter().enumerate() {
                     // Running ones, and those that finished a moment ago.

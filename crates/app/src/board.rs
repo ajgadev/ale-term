@@ -43,6 +43,33 @@ pub struct Card {
     pub icon: u64,
     /// The name the user gave the agent's tab, if any.
     pub tab: Option<String>,
+    /// Items of its plan done, and in all, when it has one.
+    pub progress: Option<(usize, usize)>,
+}
+
+/// How far along a plan is, as "3/7".
+pub fn progress_text((done, total): (usize, usize)) -> String {
+    format!("{done}/{total}")
+}
+
+/// A thin bar along the bottom of a card, filled as far as its plan has
+/// got: the done part in `ink` over a faint `track`.
+pub fn draw_progress_bar(
+    r: &mut Renderer,
+    (done, total): (usize, usize),
+    card: Rect,
+    line: f32,
+    ink: ale_render::Color,
+    track: ale_render::Color,
+) {
+    if total == 0 {
+        return;
+    }
+    let height = (line * 2.0).round();
+    let (x, y, w) = (card.x + line * 3.0, card.y + card.h - height - line, card.w - line * 4.0);
+    r.rect(x, y, w, height, track);
+    let filled = (w * done.min(total) as f32 / total as f32).round();
+    r.rect(x, y, filled, height, ink);
 }
 
 /// Draws an agent's name followed by the name the user gave its tab, if
@@ -218,7 +245,16 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, palette: &P
         let detail = format!("{} · {}", card.project, card.status);
         let detail_color =
             if card.state == AgentState::Working { dim } else { color(state_color(card.state, palette)) };
-        r.text(&fit(&detail, inner_width, cell.0), false, inner_x, third, inner_width, detail_color);
+        // A plan's progress at the end of the line, and as a bar.
+        let count = card.progress.map(progress_text).unwrap_or_default();
+        let count_width = r.text_width(&count);
+        let detail_room = if count.is_empty() { inner_width } else { inner_width - count_width - cell.0 * 2.0 };
+        r.text(&fit(&detail, detail_room, cell.0), false, inner_x, third, detail_room, detail_color);
+        if let Some(progress) = card.progress {
+            r.text(&count, false, inner_x + inner_width - count_width, third, count_width, fg);
+            let track = color(palette.border);
+            draw_progress_bar(r, progress, rect, line, color(state_color(card.state, palette)), track);
+        }
     }
 
     if model.is_empty() {
@@ -247,6 +283,7 @@ mod tests {
             elapsed: "3m".into(),
             icon: 0,
             tab: None,
+            progress: None,
         }
     }
 

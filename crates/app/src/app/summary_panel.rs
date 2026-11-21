@@ -129,6 +129,7 @@ impl App {
             message: None,
             actions,
             hooked: session.hooked,
+            plan: session.plan.clone(),
         };
         let transcript = session.transcript.clone();
         summary.message = transcript.and_then(|path| self.last_message(&path));
