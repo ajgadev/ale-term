@@ -29,17 +29,12 @@ pub struct StartPage {
 pub enum Hit {
     /// "or open a terminal".
     Terminal,
-    /// The agent's name: picks the next agent.
+    /// The agent's name: opens the list of agents.
     Agent,
     /// The send button.
     Send,
-}
-
-/// The agent after (or before) `agent` in the picker's order.
-pub fn next_agent(agent: AgentKind, step: isize) -> AgentKind {
-    let all = AgentKind::ALL;
-    let position = all.iter().position(|kind| *kind == agent).unwrap_or(0) as isize;
-    all[(position + step).rem_euclid(all.len() as isize) as usize]
+    /// The text box (shows a text cursor).
+    Input,
 }
 
 /// The name of the git branch checked out in `root`, read from the
@@ -117,12 +112,28 @@ pub fn hit(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32, x: f32, y
         Some(Hit::Send)
     } else if layout.agent.contains(x, y) {
         Some(Hit::Agent)
+    } else if layout.input.contains(x, y) {
+        Some(Hit::Input)
     } else {
         None
     }
 }
 
-pub fn draw(r: &mut Renderer, page: &StartPage, project: &str, area: Rect, scale: f32, palette: &Palette) {
+/// Where the agent picker is; its menu opens below it.
+pub fn agent_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Rect {
+    layout(area, cell, scale, agent_label(page.agent).chars().count()).agent
+}
+
+/// How the page looks right now, beyond its own state.
+#[derive(Clone, Copy, Default)]
+pub struct View {
+    /// The control under the pointer.
+    pub hovered: Option<Hit>,
+    /// The agent menu is open.
+    pub picking: bool,
+}
+
+pub fn draw(r: &mut Renderer, page: &StartPage, view: View, project: &str, area: Rect, scale: f32, palette: &Palette) {
     let metrics = r.metrics();
     let cell = (metrics.width, metrics.height);
     let line = scale.round().max(1.0);
@@ -142,8 +153,11 @@ pub fn draw(r: &mut Renderer, page: &StartPage, project: &str, area: Rect, scale
     x += r.text(before, false, x, layout.heading_y, area.w, fg);
     x += r.text(project, true, x, layout.heading_y, area.w, fg);
     r.text(after, false, x, layout.heading_y, area.w, fg);
-    r.text("or open a terminal", false, layout.terminal.x, layout.terminal.y, layout.terminal.w + cell.0, dim);
-    r.rect(layout.terminal.x, layout.terminal.y + cell.1, layout.terminal.w, line, color(palette.border));
+    let link_hovered = view.hovered == Some(Hit::Terminal);
+    let link_color = if link_hovered { fg } else { dim };
+    r.text("or open a terminal", false, layout.terminal.x, layout.terminal.y, layout.terminal.w + cell.0, link_color);
+    let underline = if link_hovered { palette.accent } else { palette.border };
+    r.rect(layout.terminal.x, layout.terminal.y + cell.1, layout.terminal.w, line, color(underline));
 
     // The input box.
     let input = layout.input;
@@ -179,13 +193,22 @@ pub fn draw(r: &mut Renderer, page: &StartPage, project: &str, area: Rect, scale
 
     // Agent picker and send button.
     let agent = layout.agent;
+    if view.picking || view.hovered == Some(Hit::Agent) {
+        r.rect(agent.x, agent.y, agent.w, agent.h, color(palette.selection));
+    }
     let label_y = agent.y + ((agent.h - cell.1) / 2.0).round();
     let icon = cell.1.min(cell.0 * 2.5).round();
     r.image(crate::icons::key(page.agent), agent.x + gap, label_y, icon, icon, [0.0, 0.0, 1.0, 1.0]);
     r.text(&label, false, agent.x + gap, label_y, agent.w, fg);
     let send = layout.send;
     let ready = !page.text.trim().is_empty();
-    r.rect(send.x, send.y, send.w, send.h, color(if ready { palette.accent } else { palette.border }));
+    let send_color = match (ready, view.hovered == Some(Hit::Send)) {
+        (true, true) => lighten(palette.accent),
+        (true, false) => palette.accent,
+        (false, true) => palette.selection,
+        (false, false) => palette.border,
+    };
+    r.rect(send.x, send.y, send.w, send.h, color(send_color));
     let arrow_x = send.x + ((send.w - cell.0) / 2.0).round();
     r.text("↑", true, arrow_x, send.y + ((send.h - cell.1) / 2.0).round(), send.w, color(palette.background));
 
@@ -197,10 +220,16 @@ pub fn draw(r: &mut Renderer, page: &StartPage, project: &str, area: Rect, scale
         let width = r.text_width(&text);
         r.text(&text, false, input.x + input.w - width, layout.footer_y, width, dim);
     }
-    let hints = "Enter start   ⇧Enter new line   Tab switch agent   ⌘Enter terminal";
+    let hints = "Enter start   ⇧Enter new line   Tab choose agent   ⌘Enter terminal";
     let hints_width = r.text_width(hints).min(input.w);
     let hints_x = area.x + ((area.w - hints_width) / 2.0).round();
     r.text(hints, false, hints_x, layout.footer_y + cell.1 + gap * 3.0, hints_width, dim);
+}
+
+/// A color a little closer to white, for a hovered button.
+fn lighten(rgb: ale_config::Rgb) -> ale_config::Rgb {
+    let up = |c: u8| c + (255 - c) / 6;
+    ale_config::Rgb { r: up(rgb.r), g: up(rgb.g), b: up(rgb.b) }
 }
 
 /// A folder with the home folder shortened to `~`.
@@ -255,19 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_cycles_through_every_agent() {
-        let mut agent = AgentKind::Claude;
-        let mut seen = vec![agent];
-        for _ in 1..AgentKind::ALL.len() {
-            agent = next_agent(agent, 1);
-            seen.push(agent);
-        }
-        assert_eq!(seen.len(), AgentKind::ALL.len());
-        assert_eq!(next_agent(agent, 1), AgentKind::Claude);
-        assert_eq!(next_agent(AgentKind::Claude, -1), agent);
-    }
-
-    #[test]
     fn controls_are_inside_the_page_and_clickable() {
         let page = page();
         let layout = layout(AREA, CELL, 1.0, agent_label(page.agent).chars().count());
@@ -275,7 +291,9 @@ mod tests {
         assert_eq!(at(layout.terminal), Some(Hit::Terminal));
         assert_eq!(at(layout.send), Some(Hit::Send));
         assert_eq!(at(layout.agent), Some(Hit::Agent));
-        assert_eq!(hit(&page, AREA, CELL, 1.0, layout.input.x + 20.0, layout.input.y + 20.0), None);
+        assert_eq!(hit(&page, AREA, CELL, 1.0, layout.input.x + 20.0, layout.input.y + 20.0), Some(Hit::Input));
+        assert_eq!(hit(&page, AREA, CELL, 1.0, AREA.x + 2.0, AREA.y + 2.0), None);
+        assert_eq!(agent_button(&page, AREA, CELL, 1.0), layout.agent);
         // The picker and button sit inside the input box, side by side.
         assert!(layout.agent.x >= layout.input.x && layout.agent.x + layout.agent.w <= layout.send.x);
         assert!(layout.send.x + layout.send.w <= layout.input.x + layout.input.w);

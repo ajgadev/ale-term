@@ -9,6 +9,7 @@
 mod agents;
 mod frame;
 mod graph_panel;
+mod menus;
 mod mouse;
 mod overlays;
 mod start_page;
@@ -117,6 +118,8 @@ struct Mouse {
     /// The part of the tab bar under the pointer, for showing a tab's
     /// close button.
     hover_tab: Option<TabBarHit>,
+    /// The pointer shape last set, so it is only changed when needed.
+    cursor: CursorIcon,
 }
 
 /// A link under the mouse while Cmd is held.
@@ -240,6 +243,7 @@ impl App {
                 click_count: 0,
                 last_cell: None,
                 hover_tab: None,
+                cursor: CursorIcon::Default,
             },
             overlay: Overlay::None,
             last_search: String::new(),
@@ -1073,6 +1077,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.start_launch(true);
                 } else if step == "start:terminal" {
                     self.start_launch(false);
+                } else if step == "start:agents" {
+                    self.open_agent_menu();
+                } else if step == "sidebar:new" {
+                    self.open_new_session_menu();
+                } else if step == "down" {
+                    self.overlay_move(1);
                 } else if step == "enter" {
                     self.overlay_confirm(false, event_loop);
                 } else if let Some(change) = step.strip_prefix("setting:") {

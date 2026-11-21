@@ -85,6 +85,8 @@ pub enum Overlay {
         selected: usize,
         editing: Option<String>,
     },
+    /// A dropdown menu under a button.
+    Menu(Box<crate::menu::Menu>),
     /// The board of agents, with the selected card's column and row.
     Board {
         selected: (usize, usize),
@@ -106,7 +108,11 @@ impl Overlay {
     pub fn is_modal(&self) -> bool {
         matches!(
             self,
-            Overlay::Palette { .. } | Overlay::Input { .. } | Overlay::Confirm(_) | Overlay::Settings { .. }
+            Overlay::Palette { .. }
+                | Overlay::Input { .. }
+                | Overlay::Confirm(_)
+                | Overlay::Settings { .. }
+                | Overlay::Menu(_)
         )
     }
 
@@ -117,7 +123,7 @@ impl Overlay {
                 Some(query)
             }
             Overlay::Settings { editing, .. } => editing.as_mut(),
-            Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } => None,
+            Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } | Overlay::Menu(_) => None,
         }
     }
 }

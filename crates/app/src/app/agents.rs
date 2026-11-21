@@ -24,6 +24,8 @@ pub struct SidebarState {
     /// The search box has the keyboard.
     pub searching: bool,
     pub scroll: f32,
+    /// What the pointer is over, for hover highlights.
+    pub hovered: Option<Hit>,
 }
 
 /// Order of the groups when the sidebar is grouped by status: what needs
@@ -577,10 +579,12 @@ impl App {
             searching: self.sidebar.searching,
             notice: self.hooks_notice(),
             archived: self.archive.len(),
+            hovered: self.sidebar.hovered,
+            menu_open: matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == crate::menu::MenuKind::NewSession),
         }
     }
 
-    fn sidebar_geometry(&self) -> Option<(Rect, (f32, f32), f32)> {
+    pub(super) fn sidebar_geometry(&self) -> Option<(Rect, (f32, f32), f32)> {
         let rect = self.sidebar_rect()?;
         let metrics = self.renderer.as_ref()?.metrics();
         Some((rect, (metrics.width, metrics.height), self.scale()))
@@ -620,7 +624,7 @@ impl App {
             }
             Hit::Search => self.sidebar.searching = true,
             Hit::Notice => self.offer_hooks(),
-            Hit::NewSession => self.new_agent_session(),
+            Hit::NewSession => self.open_new_session_menu(),
             Hit::Archive => self.open_list(ListKind::Archive),
             Hit::TitleBar => {
                 let clicks = self.register_click();

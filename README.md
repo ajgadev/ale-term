@@ -84,11 +84,12 @@ not in front, shows a macOS notification. Both can be turned off under
 `[agents]`. A finished turn is never announced; it shows as Done on the tab
 and in the sidebar.
 
-**New session** (Shift+Cmd+T, or the button at the top of the sidebar) opens
-a page asking what to build. Type a task and press Enter to start the
-selected agent on it; Tab switches agent; Cmd+Enter, or "or open a
-terminal", gives a plain shell instead. Nothing runs until you choose.
-Closing the last tab brings this page back instead of quitting; Cmd+Q quits.
+**New session** (Shift+Cmd+T) opens a page asking what to build; the button
+at the top of the sidebar offers that or a plain terminal. Type a task and
+press Enter to start the selected agent on it; click the agent's name (or
+press Tab) to pick another from a list; Cmd+Enter, or "or open a terminal",
+gives a plain shell instead. Nothing runs until you choose. Closing the last
+tab brings this page back instead of quitting; Cmd+Q quits.
 
 How the status is known:
 

@@ -151,6 +151,11 @@ impl App {
             }
             _ => Vec::new(),
         };
+        let start_view = self.start_view();
+        let menu = match &self.overlay {
+            Overlay::Menu(menu) => Some(menu),
+            _ => None,
+        };
         let focused_pane = self.focused_pane_id();
         let scale = self.scale();
         let padding = self.padding();
@@ -208,7 +213,7 @@ impl App {
         }
         // A tab that has not started anything yet shows the start page.
         if let Some(page) = self.tabs.get(self.active).and_then(|tab| tab.start.as_ref()) {
-            crate::start::draw(renderer, page, &workspace_name, content, scale, palette);
+            crate::start::draw(renderer, page, start_view, &workspace_name, content, scale, palette);
         }
         for divider in &layout.dividers {
             let Rect { x, y, w, h } = divider.rect;
@@ -248,6 +253,11 @@ impl App {
             Overlay::Board { .. } => {
                 if let Some((rect, model)) = &board {
                     crate::board::draw(renderer, model, *rect, scale, palette);
+                }
+            }
+            Overlay::Menu(_) => {
+                if let Some(menu) = menu {
+                    crate::menu::draw(renderer, menu, window, scale, palette);
                 }
             }
             Overlay::None => {}

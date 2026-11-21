@@ -99,6 +99,10 @@ pub struct Model {
     pub notice: Option<String>,
     /// How many ended sessions are in the archive.
     pub archived: usize,
+    /// What the pointer is over, drawn highlighted.
+    pub hovered: Option<Hit>,
+    /// The "New session" menu is open.
+    pub menu_open: bool,
 }
 
 /// What a point in the sidebar is.
@@ -151,9 +155,9 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
     let mut y = area.y + (TOP * scale).round();
 
     // "New session" button.
-    let button_height = line + gap * 3.0;
-    items.push(Placed { rect: Rect::new(area.x + pad, y, area.w - pad * 2.0, button_height), item: Item::NewSession });
-    y += button_height + gap * 2.0;
+    let button = new_session_button(area, cell, scale);
+    items.push(Placed { rect: button, item: Item::NewSession });
+    y += button.h + gap * 2.0;
 
     // Search box, with the grouping toggle to its right.
     let search_height = line + gap * 3.0;
@@ -227,6 +231,13 @@ fn layout<'a>(model: &'a Model, area: Rect, cell: (f32, f32), scale: f32, scroll
     (items, content_height)
 }
 
+/// Where the "New session" button is; its menu opens below it.
+pub fn new_session_button(area: Rect, cell: (f32, f32), scale: f32) -> Rect {
+    let pad = (PAD * scale).round();
+    let gap = (LINE_GAP * scale).round();
+    Rect::new(area.x + pad, area.y + (TOP * scale).round(), area.w - pad * 2.0, cell.1 + gap * 3.0)
+}
+
 /// The largest useful scroll offset for this model.
 pub fn max_scroll(model: &Model, area: Rect, cell: (f32, f32), scale: f32) -> f32 {
     let (items, content) = layout(model, area, cell, scale, 0.0);
@@ -285,23 +296,34 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
     r.rect(area.x + area.w - line, area.y, line, area.h, color(palette.border));
 
     let (items, _) = layout(model, area, cell, scale, scroll);
+    let hovered = |hit: Hit| model.hovered == Some(hit);
+    // A faint wash behind a row under the pointer.
+    let hover_wash = {
+        let [red, green, blue, _] = color(palette.background);
+        [red, green, blue, 140]
+    };
     for placed in &items {
         let rect = placed.rect;
         let text_y = rect.y + ((rect.h - metrics.height) / 2.0).round();
         match &placed.item {
             Item::NewSession => {
-                r.rect(rect.x, rect.y, rect.w, rect.h, color(palette.border));
-                let keys = "⇧⌘T";
-                let keys_width = r.text_width(keys);
-                r.text("+ New session", false, rect.x + gap * 2.0, text_y, rect.w - keys_width - gap * 5.0, fg);
-                r.text(keys, false, rect.x + rect.w - keys_width - gap * 2.0, text_y, keys_width, dim);
+                let lit = model.menu_open || hovered(Hit::NewSession);
+                r.rect(rect.x, rect.y, rect.w, rect.h, color(if lit { palette.selection } else { palette.border }));
+                let arrow = "▾";
+                let arrow_width = r.text_width(arrow);
+                r.text("+ New session", false, rect.x + gap * 2.0, text_y, rect.w - arrow_width - gap * 5.0, fg);
+                r.text(arrow, false, rect.x + rect.w - arrow_width - gap * 2.0, text_y, arrow_width, if lit { fg } else { dim });
             }
             Item::Archive(count) => {
+                if hovered(Hit::Archive) {
+                    r.rect(rect.x, rect.y, rect.w - line, rect.h, hover_wash);
+                }
+                let text = if hovered(Hit::Archive) { fg } else { dim };
                 r.rect(rect.x, rect.y, rect.w - line, line, color(palette.border));
                 let count = count.to_string();
                 let count_width = r.text_width(&count);
-                r.text("Archived", false, rect.x + pad, text_y, rect.w, dim);
-                r.text(&count, false, rect.x + rect.w - pad - count_width, text_y, count_width, dim);
+                r.text("Archived", false, rect.x + pad, text_y, rect.w, text);
+                r.text(&count, false, rect.x + rect.w - pad - count_width, text_y, count_width, text);
             }
             Item::Search => {
                 let border = if model.searching { palette.accent } else { palette.border };
@@ -322,18 +344,22 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                 if selected {
                     r.rect(rect.x, rect.y, rect.w, rect.h, color(palette.border));
                 }
-                r.text(label, selected, rect.x + gap, text_y, rect.w, if selected { fg } else { dim });
+                let lit = selected || hovered(Hit::Filter(*filter));
+                r.text(label, selected, rect.x + gap, text_y, rect.w, if lit { fg } else { dim });
             }
             Item::GroupToggle => {
                 // "≡" for by-project, "◐" for by-status.
                 let glyph = if model.by_status { "◐" } else { "≡" };
-                r.text(glyph, false, rect.x + cell.0, text_y, rect.w, dim);
+                r.text(glyph, false, rect.x + cell.0, text_y, rect.w, if hovered(Hit::GroupToggle) { fg } else { dim });
             }
             Item::Header(title) => {
                 let label = fit(title, rect.w - pad * 2.0, cell.0);
                 r.text(&label, false, rect.x + pad, rect.y + rect.h - metrics.height - gap, rect.w, dim);
             }
-            Item::Row(Row::Agent { state, title, status, agent, elapsed, current, icon, .. }) => {
+            Item::Row(Row::Agent { target, state, title, status, agent, elapsed, current, icon }) => {
+                if !*current && hovered(Hit::Row(*target)) {
+                    r.rect(rect.x, rect.y, rect.w - line, rect.h, hover_wash);
+                }
                 if *current {
                     r.rect(rect.x, rect.y, rect.w - line, rect.h, color(palette.background));
                     r.rect(rect.x, rect.y, line * 2.0, rect.h, color(palette.accent));
@@ -368,19 +394,26 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, scroll: f32
                     r.text(agent, false, right - agent_width, second, agent_width, dim);
                 }
             }
-            Item::Row(Row::Subagent { text, running, .. }) => {
+            Item::Row(Row::Subagent { target, index, text, running }) => {
+                if hovered(Hit::Subagent(*target, *index)) {
+                    r.rect(rect.x, rect.y, rect.w - line, rect.h, hover_wash);
+                }
                 let text_x = rect.x + pad + metrics.height.round() + (cell.0 * 0.75).round();
                 let label = fit(&format!("↳ {text}"), rect.x + rect.w - pad - text_x, cell.0);
                 r.text(&label, false, text_x, text_y, rect.w, if *running { fg } else { dim });
             }
-            Item::Row(Row::Shell { text, current, .. }) => {
+            Item::Row(Row::Shell { target, text, current }) => {
+                let lit = hovered(Hit::Row(*target));
+                if !*current && lit {
+                    r.rect(rect.x, rect.y, rect.w - line, rect.h, hover_wash);
+                }
                 if *current {
                     r.rect(rect.x, rect.y, rect.w - line, rect.h, color(palette.background));
                     r.rect(rect.x, rect.y, line * 2.0, rect.h, color(palette.accent));
                 }
                 let label = fit(text, rect.w - pad * 2.0 - cell.0 * 2.0, cell.0);
                 r.text("›", false, rect.x + pad, text_y, cell.0 * 2.0, dim);
-                r.text(&label, false, rect.x + pad + cell.0 * 2.0, text_y, rect.w, if *current { fg } else { dim });
+                r.text(&label, false, rect.x + pad + cell.0 * 2.0, text_y, rect.w, if *current || lit { fg } else { dim });
             }
             Item::Notice(text) => {
                 r.rect(rect.x, rect.y, rect.w - line, line, color(palette.border));

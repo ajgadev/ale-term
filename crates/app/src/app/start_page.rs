@@ -4,6 +4,7 @@
 use ale_agents::AgentKind;
 
 use super::*;
+use crate::menu::{Menu, MenuKind};
 use crate::start::{self, Hit, StartPage};
 
 impl App {
@@ -92,11 +93,7 @@ impl App {
                 self.start_type("\n");
             }
             Key::Named(NamedKey::Enter) => self.start_launch(true),
-            Key::Named(NamedKey::Tab) => {
-                if let Some(page) = self.start_page_mut() {
-                    page.agent = start::next_agent(page.agent, if shift { -1 } else { 1 });
-                }
-            }
+            Key::Named(NamedKey::Tab) => self.open_agent_menu(),
             Key::Named(NamedKey::Backspace) => {
                 if let Some(page) = self.start_page_mut() {
                     if command {
@@ -133,18 +130,50 @@ impl App {
         }
         let Some(metrics) = self.renderer.as_ref().map(|r| r.metrics()) else { return true };
         let scale = self.scale();
-        let hit = self.start_page().and_then(|page| start::hit(page, area, (metrics.width, metrics.height), scale, x, y));
+        let cell = (metrics.width, metrics.height);
+        let hit = self.start_page().and_then(|page| start::hit(page, area, cell, scale, x, y));
         match hit {
             Some(Hit::Terminal) => self.start_launch(false),
             Some(Hit::Send) => self.start_launch(true),
-            Some(Hit::Agent) => {
-                if let Some(page) = self.start_page_mut() {
-                    page.agent = start::next_agent(page.agent, 1);
-                }
-            }
-            None => {}
+            Some(Hit::Agent) => self.open_agent_menu(),
+            Some(Hit::Input) | None => {}
         }
         self.redraw();
         true
+    }
+
+    /// Opens the list of agents under the start page's picker.
+    pub(super) fn open_agent_menu(&mut self) {
+        let area = self.content_rect();
+        let Some(metrics) = self.renderer.as_ref().map(|r| r.metrics()) else { return };
+        let scale = self.scale();
+        let Some(page) = self.start_page() else { return };
+        let anchor = start::agent_button(page, area, (metrics.width, metrics.height), scale);
+        self.overlay = Overlay::Menu(Box::new(Menu::agents(anchor, page.agent)));
+        self.redraw();
+    }
+
+    /// Sets the agent the start page will run.
+    pub(super) fn start_set_agent(&mut self, agent: AgentKind) {
+        if let Some(page) = self.start_page_mut() {
+            page.agent = agent;
+        }
+        self.redraw();
+    }
+
+    /// What the start page under the pointer looks like: the hovered
+    /// control and whether its menu is open.
+    pub(super) fn start_view(&self) -> start::View {
+        let picking = matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == MenuKind::Agent);
+        let hovered = if self.overlay.is_open() { None } else { self.start_hit(self.mouse.x, self.mouse.y) };
+        start::View { hovered, picking }
+    }
+
+    /// The start page control at a window position.
+    pub(super) fn start_hit(&self, x: f32, y: f32) -> Option<Hit> {
+        let area = self.content_rect();
+        let metrics = self.renderer.as_ref()?.metrics();
+        let page = self.start_page()?;
+        start::hit(page, area, (metrics.width, metrics.height), self.scale(), x, y)
     }
 }

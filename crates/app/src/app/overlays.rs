@@ -18,6 +18,9 @@ impl App {
             Key::Named(NamedKey::Enter) => return self.overlay_confirm(shift, event_loop),
             Key::Named(NamedKey::ArrowUp) => return self.overlay_move(-1),
             Key::Named(NamedKey::ArrowDown) => return self.overlay_move(1),
+            Key::Named(NamedKey::Tab) if matches!(self.overlay, Overlay::Menu(_)) => {
+                return self.overlay_move(if shift { -1 } else { 1 });
+            }
             Key::Named(NamedKey::ArrowLeft) if matches!(self.overlay, Overlay::Board { .. }) => {
                 return self.board_move(-1, 0);
             }
@@ -77,6 +80,7 @@ impl App {
             | Overlay::Input { .. }
             | Overlay::Confirm(_)
             | Overlay::Board { .. }
+            | Overlay::Menu(_)
             | Overlay::Settings { .. } => {}
         }
         self.redraw();
@@ -98,6 +102,12 @@ impl App {
                 self.search_step(direction, true);
             }
             Overlay::Board { .. } => self.board_move(0, offset),
+            Overlay::Menu(_) => {
+                if let Overlay::Menu(menu) = &mut self.overlay {
+                    menu.step(offset);
+                }
+                self.redraw();
+            }
             Overlay::Settings { .. } | Overlay::None | Overlay::Input { .. } | Overlay::Confirm(_) => {}
         }
     }
@@ -125,6 +135,10 @@ impl App {
             Overlay::Search { .. } => {
                 let direction = if shift { SearchDirection::Right } else { SearchDirection::Left };
                 self.search_step(direction, true);
+            }
+            Overlay::Menu(menu) => {
+                let index = menu.selected;
+                self.menu_choose(index);
             }
             Overlay::Settings { .. } | Overlay::None => {}
         }

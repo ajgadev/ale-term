@@ -34,6 +34,13 @@ impl App {
     }
 
     pub(super) fn mouse_button(&mut self, state: ElementState, mouse_button: MouseButton, event_loop: &ActiveEventLoop) {
+        self.mouse_press(state, mouse_button, event_loop);
+        // What is under the pointer may have changed (a menu opened, a
+        // start page became a terminal): show the right pointer at once.
+        self.update_hover();
+    }
+
+    fn mouse_press(&mut self, state: ElementState, mouse_button: MouseButton, event_loop: &ActiveEventLoop) {
         let (x, y) = (self.mouse.x, self.mouse.y);
         let code = match mouse_button {
             MouseButton::Left => button::LEFT,
@@ -57,6 +64,13 @@ impl App {
             {
                 self.report_mouse(pane, rect, MouseAction::Release, code, mode);
             }
+            return;
+        }
+
+        // A dropdown menu takes every click: on a row picks it, elsewhere
+        // closes the menu.
+        if matches!(self.overlay, Overlay::Menu(_)) {
+            self.menu_click(x, y, mouse_button);
             return;
         }
 
@@ -284,29 +298,136 @@ impl App {
         }
 
         self.update_hover_link();
+        self.update_hover();
+    }
+
+    /// Updates everything that depends on what is under the pointer: hover
+    /// highlights and the pointer's shape.
+    pub(super) fn update_hover(&mut self) {
+        let (x, y) = (self.mouse.x, self.mouse.y);
         // Which tab the pointer is over decides where a close button shows.
-        let hover_tab = self.tab_bar().hit(x, y).filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_)));
+        let hover_tab = if self.overlay.is_modal() {
+            None
+        } else {
+            self.tab_bar().hit(x, y).filter(|hit| matches!(hit, TabBarHit::Tab(_) | TabBarHit::Close(_)))
+        };
         if hover_tab != self.mouse.hover_tab {
             self.mouse.hover_tab = hover_tab;
             self.redraw();
         }
+        let hover_sidebar = if self.overlay.is_modal() { None } else { self.sidebar_hit(x, y) };
+        if hover_sidebar != self.sidebar.hovered {
+            self.sidebar.hovered = hover_sidebar;
+            self.redraw();
+        }
+        // The start page highlights the control under the pointer; it is
+        // cheap to redraw, so just do it when the pointer is over it.
+        if self.start_page().is_some() && self.content_rect().contains(x, y) {
+            self.redraw();
+        }
+        if matches!(self.overlay, Overlay::Menu(_)) {
+            self.menu_hover(x, y);
+        }
+        self.update_cursor();
+    }
 
-        // Show what a click would do.
-        let over_sidebar = self.sidebar_rect().is_some_and(|rect| rect.contains(x, y));
-        let over_graph = self.graph_rect().is_some_and(|rect| rect.contains(x, y));
-        let icon = if over_sidebar || over_graph || self.tab_bar().bar.contains(x, y) || self.overlay.is_modal() {
-            CursorIcon::Default
-        } else if self.hover_link.is_some() {
-            CursorIcon::Pointer
-        } else {
-            match self.divider_at(&layout, x, y) {
-                Some(Divider { axis: Axis::Horizontal, .. }) => CursorIcon::ColResize,
-                Some(Divider { axis: Axis::Vertical, .. }) => CursorIcon::RowResize,
-                None => CursorIcon::Text,
+    /// The pointer's shape: a hand over things that can be clicked, a text
+    /// cursor over text, an arrow elsewhere.
+    fn cursor_icon(&mut self) -> CursorIcon {
+        let (x, y) = (self.mouse.x, self.mouse.y);
+        match self.mouse.drag {
+            Drag::Divider(Divider { axis: Axis::Horizontal, .. }) => return CursorIcon::ColResize,
+            Drag::Divider(Divider { axis: Axis::Vertical, .. }) => return CursorIcon::RowResize,
+            Drag::Select(_) => return CursorIcon::Text,
+            Drag::Reported(_) | Drag::None => {}
+        }
+        let metrics = self.renderer.as_ref().map(|r| r.metrics());
+        let cell = metrics.map_or((8.0, 16.0), |m| (m.width, m.height));
+        let hand = |clickable: bool| if clickable { CursorIcon::Pointer } else { CursorIcon::Default };
+
+        match &self.overlay {
+            Overlay::Menu(_) => {
+                return hand(self.menu_layout().is_some_and(|layout| layout.row_at(x, y).is_some()));
             }
-        };
-        if let Some(window) = &self.window {
-            window.set_cursor(icon);
+            Overlay::Palette { kind, query, selected } => {
+                let count = self.list_items(*kind, query).len();
+                let Some(layout) = self.palette_layout(count, *selected) else { return CursorIcon::Default };
+                if layout.input.contains(x, y) {
+                    return CursorIcon::Text;
+                }
+                return hand(layout.row_at(x, y).is_some());
+            }
+            Overlay::Input { .. } => {
+                let input = self.palette_layout(0, 0).map(|layout| layout.input);
+                return if input.is_some_and(|input| input.contains(x, y)) { CursorIcon::Text } else { CursorIcon::Default };
+            }
+            Overlay::Settings { selected, .. } => {
+                let layout = crate::settings::ScreenLayout::new(self.window_size(), cell, self.scale(), *selected);
+                return hand(layout.setting_at(x, y).is_some());
+            }
+            Overlay::Confirm(_) => return CursorIcon::Default,
+            Overlay::Board { .. } => {
+                let area = self.content_rect();
+                if area.contains(x, y) {
+                    let card = crate::board::hit(&self.board_model(), area, cell, self.scale(), x, y);
+                    return hand(card.is_some());
+                }
+            }
+            Overlay::Search { .. } | Overlay::None => {}
+        }
+
+        if let Some(hit) = self.sidebar_hit(x, y) {
+            use crate::sidebar::Hit;
+            return match hit {
+                Hit::Search => CursorIcon::Text,
+                Hit::TitleBar | Hit::Nothing => CursorIcon::Default,
+                _ => CursorIcon::Pointer,
+            };
+        }
+        if let Some(rect) = self.graph_rect()
+            && rect.contains(x, y)
+        {
+            let scale = self.scale();
+            let node = self.graph_model().and_then(|model| crate::graph::hit(&model, rect, cell, scale, x, y));
+            return hand(node.is_some());
+        }
+        if let Some(hit) = self.tab_bar().hit(x, y) {
+            return hand(!matches!(hit, TabBarHit::Empty));
+        }
+        if self.tab_bar().bar.contains(x, y) {
+            return CursorIcon::Default;
+        }
+        if self.start_page().is_some() {
+            return match self.start_hit(x, y) {
+                Some(crate::start::Hit::Input) => CursorIcon::Text,
+                Some(_) => CursorIcon::Pointer,
+                None => CursorIcon::Default,
+            };
+        }
+        if self.hover_link.is_some() {
+            return CursorIcon::Pointer;
+        }
+        let layout = self.active_layout();
+        match self.divider_at(&layout, x, y) {
+            Some(Divider { axis: Axis::Horizontal, .. }) => CursorIcon::ColResize,
+            Some(Divider { axis: Axis::Vertical, .. }) => CursorIcon::RowResize,
+            None => match layout.pane_at(x, y) {
+                // A program that takes the mouse itself (an editor, a
+                // full-screen agent) gets an arrow, as in other terminals.
+                Some(pane) if self.mouse_reporting(pane).is_some() => CursorIcon::Default,
+                Some(_) => CursorIcon::Text,
+                None => CursorIcon::Default,
+            },
+        }
+    }
+
+    pub(super) fn update_cursor(&mut self) {
+        let icon = self.cursor_icon();
+        if icon != self.mouse.cursor {
+            self.mouse.cursor = icon;
+            if let Some(window) = &self.window {
+                window.set_cursor(icon);
+            }
         }
     }
 
