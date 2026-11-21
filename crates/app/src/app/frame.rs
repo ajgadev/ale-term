@@ -146,6 +146,8 @@ impl App {
             .collect();
         let sidebar = self.sidebar_rect().map(|rect| (rect, self.sidebar_model(), self.sidebar.scroll));
         let dock = self.dock_rect().map(|rect| (rect, self.dock_model(), self.dock_lights()));
+        let summary = self.summary_model();
+        let pointer = (self.mouse.x, self.mouse.y);
         let board = matches!(self.overlay, Overlay::Board { .. }).then(|| (self.content_rect(), self.board_model()));
         let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
         // A tab being renamed shows the name typed so far.
@@ -276,6 +278,9 @@ impl App {
         }
         if let Some((rect, model, lights)) = &dock {
             crate::dock::draw(renderer, model, *rect, scale, *lights, palette);
+        }
+        if let Some(summary) = &summary {
+            crate::summary::draw(renderer, summary, pointer, window, scale, palette);
         }
 
         match &self.overlay {

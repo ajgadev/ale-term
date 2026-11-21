@@ -262,6 +262,15 @@ The same can be done from a shell: `ale-term hooks status` says what is
 installed, and `ale-term hooks install claude` (or `kiro`) and `ale-term
 hooks remove claude` (or `kiro`) add and take out the hooks.
 
+**Summary**: rest the pointer on an agent's tab, sidebar row or board card
+for a moment and a card shows what it has been doing: its task and state,
+the last thing it said (for Claude Code, read from its own conversation
+file; at the end of a turn this is usually its account of what it did), and
+its latest actions ("Editing src/styles/pricing.css", "Running npm test")
+with how long ago each began. The actions come from the status hooks, so
+Claude Code and Kiro with hooks installed show them. A click puts the card
+away.
+
 **Board** (Shift+Cmd+B): every agent as a card in four columns, Needs you,
 Working, Done and Idle. Click a card, or move with the arrow keys and press
 Enter, to jump to that agent.
@@ -437,7 +446,7 @@ and quits, for checking changes by eye. `--snapshot-delay <ms>` waits first,
 splits, and each `--do <step>` runs a palette command by name or a test step:
 `type:<text>`, `wait:<ms>`, `demo:tabs`, `demo:agents` (pretend agents in
 every pane), `start:agents`, `start:folder`, `hover-tab:<tab>:<seconds>`,
-`rename:<tab>` or `setting:<section.key>:+`. The screenshots in this README were made that way,
+`rename:<tab>`, `summary:<tab>` or `setting:<section.key>:+`. The screenshots in this README were made that way,
 from a sample project with pretend agents.
 
 **Code layout**

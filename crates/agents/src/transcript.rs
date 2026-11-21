@@ -96,6 +96,23 @@ fn push_text(text: &str, out: &mut Vec<Entry>, make: fn(String) -> Entry) {
     }
 }
 
+/// What the agent said last: the lines of its latest message, as one
+/// paragraph. At the end of a turn this is usually its summary of what it
+/// did. `None` when the transcript holds nothing it said.
+pub fn last_message(path: &Path) -> Option<String> {
+    let entries = tail(path, 200);
+    let end = entries.iter().rposition(|entry| matches!(entry, Entry::Text(_)))?;
+    let start = entries[..end].iter().rposition(|entry| !matches!(entry, Entry::Text(_))).map_or(0, |at| at + 1);
+    let lines: Vec<&str> = entries[start..=end]
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    Some(clean(&lines.join(" "), 600))
+}
+
 /// Size and modification time of a transcript, for noticing changes
 /// without rereading it.
 pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
@@ -107,6 +124,18 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_last_message_is_the_latest_run_of_text() {
+        let say = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } });
+        let tool = json!({ "type": "assistant", "message": { "content": [{ "type": "tool_use", "name": "Bash", "input": { "command": "ls" } }] } });
+        let path = write("last", &[say("Looking around."), tool.clone(), say("Done: the cards line up.\nTests pass."), tool]);
+        assert_eq!(last_message(&path).as_deref(), Some("Done: the cards line up. Tests pass."));
+        let quiet = write("quiet", &[json!({ "type": "user", "message": { "content": "hi" } })]);
+        assert_eq!(last_message(&quiet), None);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(quiet);
+    }
 
     fn write(name: &str, records: &[Value]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("ale-term-transcript-{name}-{}.jsonl", std::process::id()));

@@ -83,6 +83,9 @@ impl App {
             return;
         }
 
+        // A click puts the summary card away.
+        self.dismiss_summary();
+
         // A click anywhere but the tab being renamed ends the rename,
         // keeping the new name, and then does what it always does.
         if let Some((index, ..)) = self.rename_view() {
@@ -435,6 +438,8 @@ impl App {
         let over_tab = matches!(hover_tab, Some(TabBarHit::Tab(_) | TabBarHit::Close(_)));
         let dragging = matches!(self.mouse.drag, Drag::Tab { .. } | Drag::Row { .. });
         self.set_window_movable(!over_tab && !dragging);
+        // Resting on an agent shows what it has been doing.
+        self.update_summary_hover();
         self.update_cursor();
     }
 

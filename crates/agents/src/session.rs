@@ -178,6 +178,9 @@ pub enum Change {
     Ended,
 }
 
+/// How many of its latest actions a session remembers.
+pub const RECENT_ACTIONS: usize = 6;
+
 #[derive(Clone, Debug)]
 pub struct Session {
     pub kind: AgentKind,
@@ -204,6 +207,9 @@ pub struct Session {
     /// True once a hook message has arrived: the state is then reported,
     /// not guessed.
     pub hooked: bool,
+    /// The main agent's latest actions ("Editing src/main.rs"), oldest
+    /// first, with when each began; at most [`RECENT_ACTIONS`].
+    pub recent: VecDeque<(Instant, String)>,
     last_output: Option<Instant>,
     /// Output before this moment is a reaction to something the user or
     /// the terminal did (typing, resizing, switching windows), not work.
@@ -246,6 +252,7 @@ impl Session {
             scheduled_wakeups: 0,
             pending_launches: VecDeque::new(),
             hooked: false,
+            recent: VecDeque::new(),
             last_output: None,
             settle_until: None,
             burst: None,
@@ -364,6 +371,19 @@ impl Session {
 
     pub(crate) fn set_activity(&mut self, activity: impl Into<String>) {
         self.activity = Some(clean(&activity.into(), 120));
+    }
+
+    /// Remembers an action of the main agent for its summary. The same
+    /// action twice in a row (reading a file in pieces) counts once.
+    pub(crate) fn note_action(&mut self, action: &str, now: Instant) {
+        let action = clean(action, 120);
+        if self.recent.back().is_some_and(|(_, last)| *last == action) {
+            return;
+        }
+        self.recent.push_back((now, action));
+        while self.recent.len() > RECENT_ACTIONS {
+            self.recent.pop_front();
+        }
     }
 
     /// Uses `title` as the session title unless one is already set.

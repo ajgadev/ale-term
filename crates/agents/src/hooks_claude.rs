@@ -51,7 +51,9 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
                     Change::Updated
                 }
                 None => {
-                    session.set_activity(describe_tool(payload));
+                    let action = describe_tool(payload);
+                    session.note_action(&action, now);
+                    session.set_activity(action);
                     session.set_state(AgentState::Working, now)
                 }
             }
@@ -220,6 +222,27 @@ mod tests {
         // But the agent's own title does.
         apply(&mut s, "PostToolUse", &json!({ "session_title": "Login bug fix" }), now);
         assert_eq!(s.title.as_deref(), Some("Login bug fix"));
+    }
+
+    #[test]
+    fn the_latest_actions_are_remembered_for_the_summary() {
+        let (mut s, now) = session();
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "tidy up" }), now);
+        let read = json!({ "cwd": "/repo", "tool_name": "Read", "tool_input": { "file_path": "/repo/a.rs" } });
+        apply(&mut s, "PreToolUse", &read, now);
+        // Reading the same file again in pieces counts once.
+        apply(&mut s, "PreToolUse", &read, now);
+        for n in 0..8 {
+            let run = json!({ "tool_name": "Bash", "tool_input": { "command": format!("step {n}") } });
+            apply(&mut s, "PreToolUse", &run, now);
+        }
+        let actions: Vec<&str> = s.recent.iter().map(|(_, action)| action.as_str()).collect();
+        assert_eq!(actions.len(), crate::session::RECENT_ACTIONS);
+        assert_eq!(actions.last(), Some(&"Running step 7"));
+        // A subagent's tools are its own, not the main agent's.
+        let inner = json!({ "agent_id": "a1", "tool_name": "Read", "tool_input": { "file_path": "/x.rs" } });
+        apply(&mut s, "PreToolUse", &inner, now);
+        assert_eq!(s.recent.back().map(|(_, a)| a.as_str()), Some("Running step 7"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod menus;
 mod mouse;
 mod overlays;
 mod start_page;
+mod summary_panel;
 mod tab_rename;
 mod workspaces;
 
@@ -254,6 +255,8 @@ pub struct App {
     tab_scrolling: bool,
     /// A tab whose title is being edited in place.
     renaming: Option<tab_rename::Renaming>,
+    /// The card summarizing the agent under the pointer.
+    summary: summary_panel::SummaryState,
     /// The agents installed on this Mac, once known; the start page offers
     /// only these.
     installed_agents: Option<Vec<ale_agents::available::Installed>>,
@@ -331,6 +334,7 @@ impl App {
             first_frame_logged: false,
             tab_scrolling: false,
             renaming: None,
+            summary: summary_panel::SummaryState::default(),
             installed_agents: None,
             agents_checked: None,
         }
@@ -1137,6 +1141,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.mouse.hover_tab.take().is_some() {
                     self.redraw();
                 }
+                self.clear_summary();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.mouse_button(state, button, event_loop)
@@ -1196,6 +1201,9 @@ impl ApplicationHandler<UserEvent> for App {
             wake_at(at);
         }
         if let Some(at) = self.tick_tab_scroll() {
+            wake_at(at);
+        }
+        if let Some(at) = self.tick_summary() {
             wake_at(at);
         }
 
@@ -1258,6 +1266,9 @@ impl ApplicationHandler<UserEvent> for App {
                     let seconds = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0.0);
                     self.mouse.hover_tab = Some(TabBarHit::Tab(index));
                     self.mouse.hover_tab_since = Instant::now() - Duration::from_secs_f32(seconds);
+                } else if let Some(index) = step.strip_prefix("summary:") {
+                    // "summary:0": the pointer has rested on the first tab.
+                    self.script_summary(index.parse().unwrap_or(0));
                 } else if let Some(index) = step.strip_prefix("rename:") {
                     // "rename:0": as if the first tab were double-clicked.
                     self.start_rename(index.parse().unwrap_or(0));
