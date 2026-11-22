@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -235,22 +235,21 @@ impl Store {
                     }
                 }
                 _ => {
-                    let Some(text) = read_new_lines(path, &mut mark.offset) else { continue };
                     // Gemini's records do not say where the agent ran;
                     // a file beside them does.
                     let folder = if reader == Reader::Gemini { gemini_folder(path) } else { None };
-                    for line in text.lines() {
-                        match reader {
-                            Reader::Claude => self.claude_line(line, *nested, &mut mark, projects),
-                            Reader::Codex => self.codex_line(line, &mut mark, projects),
-                            Reader::Gemini => {
-                                if let Ok(message) = serde_json::from_str::<GeminiMessage>(line) {
-                                    self.gemini_message(message, *nested, folder.as_deref(), &mut mark, projects);
-                                }
+                    let mut offset = mark.offset;
+                    read_new_lines(path, &mut offset, |line| match reader {
+                        Reader::Claude => self.claude_line(line, *nested, &mut mark, projects),
+                        Reader::Codex => self.codex_line(line, &mut mark, projects),
+                        Reader::Gemini => {
+                            if let Ok(message) = serde_json::from_str::<GeminiMessage>(line) {
+                                self.gemini_message(message, *nested, folder.as_deref(), &mut mark, projects);
                             }
-                            Reader::Journal => self.journal_line(line, projects),
                         }
-                    }
+                        Reader::Journal => self.journal_line(line, projects),
+                    });
+                    mark.offset = offset;
                 }
             }
             if mark != before {
@@ -607,26 +606,38 @@ fn find_records(folder: &Path, depth: usize, reader: Reader, nested: bool, found
     }
 }
 
-/// The complete lines added to a file since `offset`, which moves past
-/// them. A line still being written is left for next time.
-fn read_new_lines(path: &Path, offset: &mut u64) -> Option<String> {
-    let mut file = File::open(path).ok()?;
-    let length = file.metadata().ok()?.len();
+/// Calls `each` with every complete line added to a file since `offset`,
+/// which moves past them. A line still being written is left for next
+/// time. The file is read a piece at a time, never whole: a long record
+/// would otherwise take its size in memory twice over, and the allocator
+/// keeps buffers that big around after they are freed.
+fn read_new_lines(path: &Path, offset: &mut u64, mut each: impl FnMut(&str)) {
+    let Ok(mut file) = File::open(path) else { return };
+    let Ok(length) = file.metadata().map(|meta| meta.len()) else { return };
     if length < *offset {
         // The file was replaced by a shorter one. What it held is already
         // counted; carry on from its end.
         *offset = length;
     }
-    if length == *offset {
-        return None;
+    if length == *offset || file.seek(SeekFrom::Start(*offset)).is_err() {
+        return;
     }
-    file.seek(SeekFrom::Start(*offset)).ok()?;
-    let mut bytes = Vec::with_capacity((length - *offset) as usize);
-    file.read_to_end(&mut bytes).ok()?;
-    let complete = bytes.iter().rposition(|byte| *byte == b'\n')? + 1;
-    bytes.truncate(complete);
-    *offset += complete as u64;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    // Only as far as the file reached just now: what the agent writes
+    // meanwhile waits for the next scan.
+    let mut reader = BufReader::with_capacity(64 * 1024, file).take(length - *offset);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(read) if line.last() == Some(&b'\n') => {
+                *offset += read as u64;
+                let text = line.strip_suffix(b"\n").unwrap_or(&line);
+                each(&String::from_utf8_lossy(text.strip_suffix(b"\r").unwrap_or(text)));
+            }
+            // The end, a line not finished yet, or a read error.
+            _ => break,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1217,6 +1228,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn only_new_complete_lines_are_read() {
+        let file = scratch("lines").join("record.jsonl");
+        let read = |offset: &mut u64| {
+            let mut lines = Vec::new();
+            read_new_lines(&file, offset, |line| lines.push(line.to_owned()));
+            lines
+        };
+        // A long line spans several of the reader's pieces.
+        let long = "x".repeat(200_000);
+        std::fs::write(&file, format!("one\r\n{long}\nthree")).unwrap();
+        let mut offset = 0;
+        assert_eq!(read(&mut offset), ["one", long.as_str()]);
+        assert_eq!(offset, 5 + long.len() as u64 + 1);
+
+        // The unfinished line is read once it is finished.
+        std::fs::write(&file, format!("one\r\n{long}\nthree\nfour\n")).unwrap();
+        assert_eq!(read(&mut offset), ["three", "four"]);
+        assert!(read(&mut offset).is_empty());
+
+        // A shorter file replacing it is not read again from the start.
+        std::fs::write(&file, "new\n").unwrap();
+        assert!(read(&mut offset).is_empty());
+        assert_eq!(offset, 4);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]
