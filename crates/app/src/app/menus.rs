@@ -61,6 +61,11 @@ impl App {
                     self.start_set_agent(agent);
                 }
             }
+            MenuKind::Model | MenuKind::Effort => {
+                if let Some(item) = menu.items.get(index) {
+                    self.start_set_option(menu.kind, item.value);
+                }
+            }
             MenuKind::Folder => match menu.items.get(index).map(|item| item.folder.clone()) {
                 Some(Some(folder)) => {
                     if let Some(tab) = self.tabs.get(self.active).map(|tab| tab.id) {

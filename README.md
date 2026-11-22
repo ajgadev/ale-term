@@ -234,6 +234,13 @@ press Tab) to pick another from a list; Cmd+Enter, or "or open a terminal",
 gives a plain shell instead. Nothing runs until you choose. Closing the last
 tab brings this page back instead of quitting; Cmd+Q quits.
 
+Beside the agent's name, Claude Code offers a model (Fable, Opus, Sonnet,
+Haiku) and an effort level (Low to Max), and Kiro an effort level. Both start
+on Default, which passes nothing and leaves the agent on its own setting
+(for Claude Code, what `/model` and `/effort` saved); a choice is added as
+`--model` or `--effort`. The page remembers what each agent was last started
+with until ale-term quits.
+
 The list of agents shows only the ones installed on this Mac, each with
 where it was found. ale-term asks your login shell, the same one a tab runs,
 whether each agent's command exists, so agents installed through nvm,

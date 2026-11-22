@@ -271,6 +271,9 @@ pub struct App {
     installed_agents: Option<Vec<ale_agents::available::Installed>>,
     /// When the last check for installed agents started.
     agents_checked: Option<Instant>,
+    /// The model and effort each agent was last started with from a start
+    /// page, offered again on the next one.
+    start_options: HashMap<ale_agents::AgentKind, (Option<&'static str>, Option<&'static str>)>,
 }
 
 impl App {
@@ -348,6 +351,7 @@ impl App {
             summary: summary_panel::SummaryState::default(),
             installed_agents: None,
             agents_checked: None,
+            start_options: HashMap::new(),
         }
     }
 
@@ -1327,6 +1331,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.start_launch(false);
                 } else if step == "start:agents" {
                     self.open_agent_menu();
+                } else if step == "start:model" {
+                    self.open_option_menu(crate::menu::MenuKind::Model);
+                } else if step == "start:effort" {
+                    self.open_option_menu(crate::menu::MenuKind::Effort);
                 } else if step == "menu:split" {
                     self.open_split_menu();
                 } else if step == "menu:pane" {

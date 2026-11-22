@@ -21,6 +21,10 @@ pub enum MenuKind {
     Agent,
     /// Which folder the start page's session runs in.
     Folder,
+    /// Which model the start page's agent runs with.
+    Model,
+    /// Which effort level the start page's agent runs with.
+    Effort,
     /// Commands to run, such as the split button's menu or a pane's
     /// right-click menu.
     Commands,
@@ -42,6 +46,9 @@ pub struct MenuItem {
     pub folder: Option<std::path::PathBuf>,
     /// The command this row runs, in a menu of commands.
     pub action: Option<crate::actions::Action>,
+    /// The value this row picks, in the model and effort menus. `None` on
+    /// the row for the agent's own default.
+    pub value: Option<&'static str>,
 }
 
 pub struct Menu {
@@ -68,6 +75,7 @@ impl Menu {
             agent: None,
             folder: None,
             action: None,
+            value: None,
         };
         Menu {
             kind: MenuKind::NewSession,
@@ -90,6 +98,7 @@ impl Menu {
                 agent: Some(*kind),
                 folder: None,
                 action: None,
+                value: None,
             })
             .collect();
         let selected = choices.iter().position(|(kind, _)| *kind == current).unwrap_or(0);
@@ -109,6 +118,7 @@ impl Menu {
                 agent: None,
                 folder: Some(path.clone()),
                 action: None,
+                value: None,
             })
             .collect();
         items.push(MenuItem {
@@ -119,9 +129,30 @@ impl Menu {
             agent: None,
             folder: None,
             action: None,
+            value: None,
         });
         let selected = items.iter().position(|item| item.checked).unwrap_or(0);
         Menu { kind: MenuKind::Folder, anchor, items, selected }
+    }
+
+    /// The model or effort levels (`kind`) an agent offers, as (label,
+    /// value), after a first row for the agent's own default. `current` is
+    /// checked.
+    pub fn options(kind: MenuKind, anchor: Rect, agent: AgentKind, current: Option<&str>, offered: &[(&str, &'static str)]) -> Menu {
+        let row = |label: &str, detail: String, value: Option<&'static str>| MenuItem {
+            label: label.into(),
+            detail,
+            icon: None,
+            checked: value == current,
+            agent: None,
+            folder: None,
+            action: None,
+            value,
+        };
+        let mut items = vec![row("Default", format!("as set in {}", agent.name()), None)];
+        items.extend(offered.iter().map(|(label, value)| row(label, String::new(), Some(*value))));
+        let selected = items.iter().position(|item| item.checked).unwrap_or(0);
+        Menu { kind, anchor, items, selected }
     }
 
     /// A menu of commands, each shown with its name from the command
@@ -142,6 +173,7 @@ impl Menu {
                     agent: None,
                     folder: None,
                     action: Some(*action),
+                    value: None,
                 }
             })
             .collect();
@@ -300,6 +332,20 @@ mod tests {
         assert_eq!((menu.items[0].label.as_str(), menu.items[0].detail.as_str()), ("Split Right", "⌘D"));
         assert_eq!((menu.items[1].label.as_str(), menu.items[1].detail.as_str()), ("Rename…", ""));
         assert_eq!(menu.items[1].action, Some(Action::RenameTab));
+    }
+
+    #[test]
+    fn option_menus_start_with_the_agents_default() {
+        let offered = [("Opus", "opus"), ("Sonnet", "sonnet")];
+        let menu = Menu::options(MenuKind::Model, Rect::default(), AgentKind::Claude, None, &offered);
+        let values: Vec<Option<&str>> = menu.items.iter().map(|item| item.value).collect();
+        assert_eq!(values, [None, Some("opus"), Some("sonnet")]);
+        assert_eq!(menu.items[0].label, "Default");
+        assert_eq!(menu.items[0].detail, "as set in Claude Code");
+        assert!(menu.items[0].checked && menu.selected == 0);
+        let menu = Menu::options(MenuKind::Model, Rect::default(), AgentKind::Claude, Some("sonnet"), &offered);
+        assert!(menu.items[2].checked && !menu.items[0].checked);
+        assert_eq!(menu.selected, 2);
     }
 
     #[test]

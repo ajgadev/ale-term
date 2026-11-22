@@ -22,6 +22,12 @@ pub struct StartPage {
     pub text: String,
     /// The agent that will be started.
     pub agent: AgentKind,
+    /// The model it is started with (the value of its model flag), or
+    /// `None` for the agent's own default.
+    pub model: Option<&'static str>,
+    /// The effort it is started with, or `None` for the agent's own
+    /// default.
+    pub effort: Option<&'static str>,
     /// Where it will run.
     pub directory: PathBuf,
     /// The folder's files, for `@` references; `None` while being listed.
@@ -37,7 +43,32 @@ pub const SUGGESTIONS: usize = 8;
 
 impl StartPage {
     pub fn new(agent: AgentKind, directory: PathBuf) -> Self {
-        StartPage { text: String::new(), agent, directory, files: None, suggestion: 0, suggestions_closed: false }
+        StartPage {
+            text: String::new(),
+            agent,
+            model: None,
+            effort: None,
+            directory,
+            files: None,
+            suggestion: 0,
+            suggestions_closed: false,
+        }
+    }
+
+    /// Switches to another agent. A model or effort that agent does not
+    /// offer goes back to its default.
+    pub fn set_agent(&mut self, agent: AgentKind) {
+        self.agent = agent;
+        self.choose(self.model, self.effort);
+    }
+
+    /// Sets the model and effort, each only if the agent offers it (and
+    /// otherwise to its default).
+    pub fn choose(&mut self, model: Option<&'static str>, effort: Option<&'static str>) {
+        let offered = options(self.agent);
+        let offers = |list: &[(&str, &str)], wanted: &str| list.iter().any(|(_, value)| *value == wanted);
+        self.model = model.filter(|model| offers(offered.models, model));
+        self.effort = effort.filter(|effort| offers(offered.efforts, effort));
     }
 
     /// Whether an `@` reference is being typed and its list is open.
@@ -67,6 +98,10 @@ pub enum Hit {
     Terminal,
     /// The agent's name: opens the list of agents.
     Agent,
+    /// The model picker: opens the agent's models.
+    Model,
+    /// The effort picker: opens the agent's effort levels.
+    Effort,
     /// The send button.
     Send,
     /// The text box (shows a text cursor).
@@ -92,17 +127,61 @@ pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// The command line that starts `agent` on `prompt`.
+/// The models and effort levels an agent can be started with, each as
+/// (label, value of its flag). Empty when ale-term does not know the
+/// agent's flags; the page then offers no picker for it.
+pub struct Options {
+    pub models: &'static [(&'static str, &'static str)],
+    pub efforts: &'static [(&'static str, &'static str)],
+}
+
+/// The effort levels Claude Code and Kiro both take.
+const EFFORTS: &[(&str, &str)] =
+    &[("Low", "low"), ("Medium", "medium"), ("High", "high"), ("Extra high", "xhigh"), ("Max", "max")];
+
+pub fn options(agent: AgentKind) -> Options {
+    match agent {
+        // Aliases, which always mean the latest model of each family.
+        AgentKind::Claude => Options {
+            models: &[("Fable", "fable"), ("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku")],
+            efforts: EFFORTS,
+        },
+        // Kiro's models depend on the account, so only its effort is
+        // offered.
+        AgentKind::Kiro => Options { models: &[], efforts: EFFORTS },
+        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Gemini => Options { models: &[], efforts: &[] },
+    }
+}
+
+/// The command line that starts the page's agent, with its model and
+/// effort, on `prompt`. The model and effort are values from `options`,
+/// plain words that need no quoting.
 ///
 /// `configured` is the user's own command for new sessions; it is used when
 /// it is for the same agent, so any options in it are kept.
-pub fn launch_command(agent: AgentKind, configured: &str, prompt: &str) -> String {
+pub fn launch_command(agent: AgentKind, configured: &str, model: Option<&str>, effort: Option<&str>, prompt: &str) -> String {
     let base = match AgentKind::from_command(configured) {
         Some(kind) if kind == agent => configured.trim(),
         _ => ale_agents::archive::start_command(agent),
     };
+    let mut command = base.to_owned();
     let prompt = prompt.trim();
-    if prompt.is_empty() { base.to_owned() } else { format!("{base} {}", shell_quote(prompt)) }
+    let has_arguments = model.is_some() || effort.is_some() || !prompt.is_empty();
+    // Kiro takes a prompt and these options only on its `chat` command.
+    if agent == AgentKind::Kiro && has_arguments && !base.split_whitespace().any(|word| word == "chat") {
+        command.push_str(" chat");
+    }
+    if let Some(model) = model {
+        command.push_str(&format!(" --model {model}"));
+    }
+    if let Some(effort) = effort {
+        command.push_str(&format!(" --effort {effort}"));
+    }
+    if !prompt.is_empty() {
+        command.push(' ');
+        command.push_str(&shell_quote(prompt));
+    }
+    command
 }
 
 struct Layout {
@@ -110,6 +189,10 @@ struct Layout {
     terminal: Rect,
     input: Rect,
     agent: Rect,
+    /// The model and effort pickers, left of the agent's; empty when the
+    /// agent offers none or the box is too narrow for them.
+    model: Rect,
+    effort: Rect,
     send: Rect,
     attach: Rect,
     folder: Rect,
@@ -118,10 +201,19 @@ struct Layout {
     footer_y: f32,
 }
 
+/// How wide the page's button labels are, in cells (0 for a picker that
+/// is not shown).
+#[derive(Clone, Copy, Default)]
+struct Labels {
+    agent: usize,
+    model: usize,
+    effort: usize,
+    folder: usize,
+}
+
 /// Lays the page out. `suggestion_rows` is how many rows the `@` file
 /// list shows (0 when closed).
-fn layout(area: Rect, cell: (f32, f32), scale: f32, labels: (usize, usize), suggestion_rows: usize) -> Layout {
-    let (agent_label_cells, folder_label_cells) = labels;
+fn layout(area: Rect, cell: (f32, f32), scale: f32, labels: Labels, suggestion_rows: usize) -> Layout {
     let gap = (6.0 * scale).round();
     let pad = (14.0 * scale).round();
     let width = (820.0 * scale).min(area.w - 48.0 * scale).max(cell.0 * 24.0).round();
@@ -141,18 +233,33 @@ fn layout(area: Rect, cell: (f32, f32), scale: f32, labels: (usize, usize), sugg
     let row_y = input.y + input.h - pad - cell.1;
     let send_size = cell.1 + gap * 2.0;
     let send = Rect::new(input.x + input.w - pad - send_size, row_y - gap, send_size, send_size);
-    let agent_width = agent_label_cells as f32 * cell.0 + gap * 2.0;
+    let agent_width = labels.agent as f32 * cell.0 + gap * 2.0;
     let agent = Rect::new(send.x - gap * 2.0 - agent_width, row_y - gap, agent_width, send_size);
     let attach = Rect::new(input.x + pad - gap, row_y - gap, send_size, send_size);
+    // The effort and model pickers, right to left from the agent's.
+    let mut right = agent.x;
+    let mut picker = |cells: usize| {
+        if cells == 0 {
+            return Rect::default();
+        }
+        let width = cells as f32 * cell.0 + gap * 2.0;
+        right -= gap + width;
+        Rect::new(right, row_y - gap, width, send_size)
+    };
+    let (mut effort, mut model) = (picker(labels.effort), picker(labels.model));
+    if right < attach.x + attach.w + gap {
+        // No room beside the paperclip: leave them out.
+        (effort, model) = (Rect::default(), Rect::default());
+    }
     let footer_y = input.y + input.h + gap * 2.0;
-    let folder_width = (folder_label_cells as f32 * cell.0 + gap * 2.0).min(input.w * 0.6);
+    let folder_width = (labels.folder as f32 * cell.0 + gap * 2.0).min(input.w * 0.6);
     let folder = Rect::new(input.x - gap, footer_y - gap, folder_width, cell.1 + gap * 2.0);
     let row_height = (cell.1 + gap * 1.5).round();
     let list_width = (input.w - pad * 2.0).min(cell.0 * 72.0);
     let suggestions = (0..suggestion_rows)
         .map(|row| Rect::new(input.x + pad, input.y + input.h + line_gap(gap) + row as f32 * row_height, list_width, row_height))
         .collect();
-    Layout { heading_y, terminal, input, agent, send, attach, folder, suggestions, footer_y }
+    Layout { heading_y, terminal, input, agent, model, effort, send, attach, folder, suggestions, footer_y }
 }
 
 /// Space between the box and the file list below it.
@@ -172,13 +279,42 @@ fn suggestion_rows(page: &StartPage) -> usize {
 }
 
 fn page_layout(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Layout {
-    let labels = (agent_label(page.agent).chars().count(), folder_label(page).chars().count() + 1);
+    let cells = |label: Option<String>| label.map_or(0, |label| label.chars().count());
+    let labels = Labels {
+        agent: agent_label(page.agent).chars().count(),
+        model: cells(model_label(page)),
+        effort: cells(effort_label(page)),
+        folder: folder_label(page).chars().count() + 1,
+    };
     layout(area, cell, scale, labels, suggestion_rows(page))
 }
 
 /// The picker's text: icon space, name and a marker that it can change.
 fn agent_label(agent: AgentKind) -> String {
     format!("   {} ▾", agent.name())
+}
+
+/// The model picker's text, or `None` when the agent offers no models.
+fn model_label(page: &StartPage) -> Option<String> {
+    choice_label(options(page.agent).models, page.model, "model")
+}
+
+/// The effort picker's text, or `None` when the agent offers no levels.
+fn effort_label(page: &StartPage) -> Option<String> {
+    let label = choice_label(options(page.agent).efforts, page.effort, "effort")?;
+    // "High effort ▾" reads better than "High ▾".
+    Some(if page.effort.is_some() { label.replace(" ▾", " effort ▾") } else { label })
+}
+
+fn choice_label(offered: &[(&str, &str)], chosen: Option<&str>, what: &str) -> Option<String> {
+    if offered.is_empty() {
+        return None;
+    }
+    let name = chosen.and_then(|chosen| offered.iter().find(|(_, value)| *value == chosen)).map(|(label, _)| *label);
+    Some(match name {
+        Some(name) => format!("{name} ▾"),
+        None => format!("Default {what} ▾"),
+    })
 }
 
 pub fn hit(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32, x: f32, y: f32) -> Option<Hit> {
@@ -196,6 +332,10 @@ pub fn hit(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32, x: f32, y
         Some(Hit::Send)
     } else if layout.agent.contains(x, y) {
         Some(Hit::Agent)
+    } else if layout.model.contains(x, y) {
+        Some(Hit::Model)
+    } else if layout.effort.contains(x, y) {
+        Some(Hit::Effort)
     } else if layout.attach.contains(x, y) {
         Some(Hit::Attach)
     } else if layout.folder.contains(x, y) {
@@ -212,6 +352,16 @@ pub fn agent_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) 
     page_layout(page, area, cell, scale).agent
 }
 
+/// Where the model picker is; its menu opens below it.
+pub fn model_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Rect {
+    page_layout(page, area, cell, scale).model
+}
+
+/// Where the effort picker is; its menu opens below it.
+pub fn effort_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Rect {
+    page_layout(page, area, cell, scale).effort
+}
+
 /// Where the folder button is; its menu opens below it.
 pub fn folder_button(page: &StartPage, area: Rect, cell: (f32, f32), scale: f32) -> Rect {
     page_layout(page, area, cell, scale).folder
@@ -224,6 +374,10 @@ pub struct View {
     pub hovered: Option<Hit>,
     /// The agent menu is open.
     pub picking: bool,
+    /// The model menu is open.
+    pub picking_model: bool,
+    /// The effort menu is open.
+    pub picking_effort: bool,
     /// The folder menu is open.
     pub picking_folder: bool,
 }
@@ -300,6 +454,19 @@ pub fn draw(r: &mut Renderer, page: &StartPage, view: View, area: Rect, scale: f
     let icon = cell.1.min(cell.0 * 2.5).round();
     r.image(crate::icons::key(page.agent), agent.x + gap, label_y, icon, icon, [0.0, 0.0, 1.0, 1.0]);
     r.text(&label, false, agent.x + gap, label_y, agent.w, fg);
+    // The model and effort pickers: dimmed while on the agent's default.
+    for (rect, text, chosen, open, hit) in [
+        (layout.model, model_label(page), page.model.is_some(), view.picking_model, Hit::Model),
+        (layout.effort, effort_label(page), page.effort.is_some(), view.picking_effort, Hit::Effort),
+    ] {
+        let Some(text) = text.filter(|_| rect.w > 0.0) else { continue };
+        let lit = open || view.hovered == Some(hit);
+        if lit {
+            r.rect(rect.x, rect.y, rect.w, rect.h, color(palette.selection));
+        }
+        let text_color = if chosen || lit { fg } else { dim };
+        r.text(&text, false, rect.x + gap, label_y, rect.w, text_color);
+    }
     let send = layout.send;
     let ready = !page.text.trim().is_empty();
     let send_color = match (ready, view.hovered == Some(Hit::Send)) {
@@ -443,13 +610,73 @@ mod tests {
     #[test]
     fn launch_commands() {
         let claude = AgentKind::Claude;
-        assert_eq!(launch_command(claude, "claude", ""), "claude");
-        assert_eq!(launch_command(claude, "claude", "  add tests "), "claude 'add tests'");
+        assert_eq!(launch_command(claude, "claude", None, None, ""), "claude");
+        assert_eq!(launch_command(claude, "claude", None, None, "  add tests "), "claude 'add tests'");
         // The user's own options are kept when they are for this agent...
-        assert_eq!(launch_command(claude, "claude --model opus", "hi"), "claude --model opus 'hi'");
+        assert_eq!(launch_command(claude, "claude --model opus", None, None, "hi"), "claude --model opus 'hi'");
         // ...and not when a different agent was picked.
-        assert_eq!(launch_command(AgentKind::Codex, "claude --model opus", "hi"), "codex 'hi'");
-        assert_eq!(launch_command(AgentKind::Kiro, "claude", ""), "kiro-cli");
+        assert_eq!(launch_command(AgentKind::Codex, "claude --model opus", None, None, "hi"), "codex 'hi'");
+        assert_eq!(launch_command(AgentKind::Kiro, "claude", None, None, ""), "kiro-cli");
+    }
+
+    #[test]
+    fn the_chosen_model_and_effort_are_passed_as_flags() {
+        let claude = AgentKind::Claude;
+        assert_eq!(
+            launch_command(claude, "claude", Some("sonnet"), Some("low"), "fix it"),
+            "claude --model sonnet --effort low 'fix it'"
+        );
+        assert_eq!(launch_command(claude, "claude", None, Some("max"), ""), "claude --effort max");
+        // Kiro takes a prompt and options only on its `chat` command.
+        let kiro = AgentKind::Kiro;
+        assert_eq!(launch_command(kiro, "claude", None, None, "hi"), "kiro-cli chat 'hi'");
+        assert_eq!(launch_command(kiro, "claude", None, Some("high"), ""), "kiro-cli chat --effort high");
+        assert_eq!(launch_command(kiro, "kiro-cli --tui", None, None, "hi"), "kiro-cli --tui chat 'hi'");
+        assert_eq!(launch_command(kiro, "kiro-cli chat --agent dev", None, None, "hi"), "kiro-cli chat --agent dev 'hi'");
+    }
+
+    #[test]
+    fn switching_agents_keeps_only_what_the_new_one_offers() {
+        let mut page = page();
+        page.model = Some("opus");
+        page.effort = Some("high");
+        page.set_agent(AgentKind::Kiro);
+        assert_eq!((page.model, page.effort), (None, Some("high")));
+        page.set_agent(AgentKind::Codex);
+        assert_eq!((page.model, page.effort), (None, None));
+        // Every offered value is a plain word, safe on a command line.
+        for kind in AgentKind::ALL {
+            let offered = options(kind);
+            for (_, value) in offered.models.iter().chain(offered.efforts) {
+                assert!(value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'));
+            }
+        }
+    }
+
+    #[test]
+    fn the_model_and_effort_pickers_sit_left_of_the_agents() {
+        let mut page = page();
+        let layout = page_layout(&page, AREA, CELL, 1.0);
+        let at = |page: &StartPage, rect: Rect| hit(page, AREA, CELL, 1.0, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        assert_eq!(at(&page, layout.model), Some(Hit::Model));
+        assert_eq!(at(&page, layout.effort), Some(Hit::Effort));
+        assert_eq!(model_button(&page, AREA, CELL, 1.0), layout.model);
+        assert_eq!(effort_button(&page, AREA, CELL, 1.0), layout.effort);
+        assert!(layout.attach.x + layout.attach.w <= layout.model.x);
+        assert!(layout.model.x + layout.model.w <= layout.effort.x);
+        assert!(layout.effort.x + layout.effort.w <= layout.agent.x);
+        assert_eq!(model_label(&page).as_deref(), Some("Default model ▾"));
+        page.effort = Some("xhigh");
+        assert_eq!(effort_label(&page).as_deref(), Some("Extra high effort ▾"));
+        // An agent without options shows no pickers.
+        page.set_agent(AgentKind::Gemini);
+        let layout = page_layout(&page, AREA, CELL, 1.0);
+        assert_eq!((layout.model.w, layout.effort.w), (0.0, 0.0));
+        // Nor does a box too narrow for them.
+        let narrow = Rect::new(0.0, 0.0, 320.0, 700.0);
+        let labels = Labels { agent: 16, model: 16, effort: 16, folder: 10 };
+        let layout = super::layout(narrow, CELL, 1.0, labels, 0);
+        assert_eq!((layout.model.w, layout.effort.w), (0.0, 0.0));
     }
 
     #[test]
@@ -474,7 +701,7 @@ mod tests {
         assert!(layout.input.x >= AREA.x && layout.input.x + layout.input.w <= AREA.x + AREA.w);
         // In a very small area nothing goes above it.
         let tiny = Rect::new(0.0, 0.0, 300.0, 120.0);
-        assert!(super::layout(tiny, CELL, 1.0, (10, 10), 0).heading_y >= 0.0);
+        assert!(super::layout(tiny, CELL, 1.0, Labels { agent: 10, folder: 10, ..Labels::default() }, 0).heading_y >= 0.0);
     }
 
     #[test]

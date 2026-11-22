@@ -44,7 +44,9 @@ impl App {
         let index = self.add_tab(self.active + 1, placeholder, workspace);
         let agent = self.available_agent(agent);
         self.list_files(directory.clone());
-        self.tabs[index].start = Some(StartPage::new(agent, directory));
+        let mut page = StartPage::new(agent, directory);
+        self.recall_options(&mut page);
+        self.tabs[index].start = Some(page);
         self.activate(index);
         self.check_installed_agents();
     }
@@ -238,8 +240,10 @@ impl App {
             })
             .collect();
         for (index, agent) in replacements {
-            if let Some(page) = self.tabs[index].start.as_mut() {
-                page.agent = agent;
+            if let Some(mut page) = self.tabs[index].start.take() {
+                page.set_agent(agent);
+                self.recall_options(&mut page);
+                self.tabs[index].start = Some(page);
             }
         }
         if matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == MenuKind::Agent) {
@@ -285,8 +289,9 @@ impl App {
         tab.root = Node::Leaf(id);
         tab.focused = id;
         if with_agent {
-            let command =
-                start::launch_command(page.agent, &self.config.agents.new_session_command, &page.text);
+            self.start_options.insert(page.agent, (page.model, page.effort));
+            let configured = &self.config.agents.new_session_command;
+            let command = start::launch_command(page.agent, configured, page.model, page.effort, &page.text);
             self.type_when_ready(id, format!("{command}\r").into_bytes());
         }
         self.sync_workspace(self.active);
@@ -392,6 +397,8 @@ impl App {
             Some(Hit::Terminal) => self.start_launch(false),
             Some(Hit::Send) => self.start_launch(true),
             Some(Hit::Agent) => self.open_agent_menu(),
+            Some(Hit::Model) => self.open_option_menu(MenuKind::Model),
+            Some(Hit::Effort) => self.open_option_menu(MenuKind::Effort),
             Some(Hit::Attach) => self.choose_files(),
             Some(Hit::Folder) => self.open_folder_menu(),
             Some(Hit::Suggestion(index)) => self.start_accept_suggestion(Some(index)),
@@ -414,21 +421,64 @@ impl App {
         self.redraw();
     }
 
-    /// Sets the agent the start page will run.
+    /// Sets the agent the start page will run, with the model and effort
+    /// last used with it.
     pub(super) fn start_set_agent(&mut self, agent: AgentKind) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(mut page) = tab.start.take() else { return };
+        page.set_agent(agent);
+        self.recall_options(&mut page);
+        self.tabs[self.active].start = Some(page);
+        self.redraw();
+    }
+
+    /// Opens the model or effort menu (`kind`) under its picker.
+    pub(super) fn open_option_menu(&mut self, kind: MenuKind) {
+        let area = self.content_rect();
+        let Some(metrics) = self.renderer.as_ref().map(|r| r.metrics()) else { return };
+        let (cell, scale) = ((metrics.width, metrics.height), self.scale());
+        let Some(page) = self.start_page() else { return };
+        let offered = start::options(page.agent);
+        let (anchor, current, offered) = match kind {
+            MenuKind::Model => (start::model_button(page, area, cell, scale), page.model, offered.models),
+            _ => (start::effort_button(page, area, cell, scale), page.effort, offered.efforts),
+        };
+        if offered.is_empty() {
+            return;
+        }
+        let menu = Menu::options(kind, anchor, page.agent, current, offered);
+        self.overlay = Overlay::Menu(Box::new(menu));
+        self.redraw();
+    }
+
+    /// Sets the start page's model or effort (`kind`); `None` is the
+    /// agent's own default.
+    pub(super) fn start_set_option(&mut self, kind: MenuKind, value: Option<&'static str>) {
         if let Some(page) = self.start_page_mut() {
-            page.agent = agent;
+            match kind {
+                MenuKind::Model => page.model = value,
+                _ => page.effort = value,
+            }
         }
         self.redraw();
+    }
+
+    /// Gives a page the model and effort last started with its agent, as
+    /// long as the agent still offers them.
+    fn recall_options(&self, page: &mut StartPage) {
+        if let Some(&(model, effort)) = self.start_options.get(&page.agent) {
+            page.choose(model, effort);
+        }
     }
 
     /// What the start page under the pointer looks like: the hovered
     /// control and whether its menu is open.
     pub(super) fn start_view(&self) -> start::View {
         let picking = matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == MenuKind::Agent);
-        let picking_folder = matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == MenuKind::Folder);
+        let open = |kind: MenuKind| matches!(&self.overlay, Overlay::Menu(menu) if menu.kind == kind);
+        let (picking_folder, picking_model, picking_effort) = (open(MenuKind::Folder), open(MenuKind::Model), open(MenuKind::Effort));
         let hovered = if self.overlay.is_open() { None } else { self.start_hit(self.mouse.x, self.mouse.y) };
-        start::View { hovered, picking, picking_folder }
+        start::View { hovered, picking, picking_model, picking_effort, picking_folder }
     }
 
     /// The start page control at a window position.
