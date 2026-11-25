@@ -305,11 +305,14 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, lights: boo
         let status_end = if count.is_empty() { inner_x + inner_width } else { inner_x + inner_width - count_width - cell.0 * 2.0 };
         let status_room = status_end - status_x;
         if status_room > cell.0 * 3.0 {
-            let status_color = match card.state {
-                AgentState::Working | AgentState::Idle => dim,
-                _ => state,
+            // Subagents at work show in the working color.
+            let (doing, subagents) = card.doing();
+            let status_color = match (subagents, card.state) {
+                (true, _) => color(state_color(AgentState::Working, palette)),
+                (false, AgentState::Working | AgentState::Idle) => dim,
+                (false, _) => state,
             };
-            r.text(&fit(&card.status, status_room, cell.0), false, status_x, third, status_room, status_color);
+            r.text(&fit(doing, status_room, cell.0), false, status_x, third, status_room, status_color);
         }
         if let Some(progress) = card.progress {
             r.text(&count, false, inner_x + inner_width - count_width, third, count_width, fg);
@@ -347,6 +350,7 @@ mod tests {
             icon: 0,
             tab: None,
             progress: None,
+            subagents: None,
         }
     }
 

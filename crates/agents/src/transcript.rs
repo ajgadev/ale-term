@@ -32,26 +32,29 @@ pub enum Entry {
     Tool(String),
 }
 
-/// Reads the most recent entries of a transcript, oldest first.
-pub fn tail(path: &Path, max_entries: usize) -> Vec<Entry> {
-    let Ok(mut file) = File::open(path) else { return Vec::new() };
+/// The whole records at the end of a transcript, at most [`TAIL_BYTES`]
+/// of them.
+fn read_tail(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
     let length = file.metadata().map_or(0, |meta| meta.len());
     let start = length.saturating_sub(TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
+    file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    if file.take(TAIL_BYTES).read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines = text.lines();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if start > 0 {
         // We began mid-line; the first piece is not a whole record.
-        lines.next();
+        let first = text.find('\n').map_or(text.len(), |at| at + 1);
+        text.drain(..first);
     }
+    Some(text)
+}
+
+/// Reads the most recent entries of a transcript, oldest first.
+pub fn tail(path: &Path, max_entries: usize) -> Vec<Entry> {
+    let Some(text) = read_tail(path) else { return Vec::new() };
     let mut entries = Vec::new();
-    for line in lines {
+    for line in text.lines() {
         if let Ok(record) = serde_json::from_str::<Value>(line) {
             read_record(&record, &mut entries);
         }
@@ -59,6 +62,40 @@ pub fn tail(path: &Path, max_entries: usize) -> Vec<Entry> {
     let excess = entries.len().saturating_sub(max_entries);
     entries.drain(..excess);
     entries
+}
+
+/// How big a conversation has grown, going by its latest reply.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// The model that wrote the reply, as the agent names it
+    /// ("claude-opus-5-5").
+    pub model: Option<String>,
+    /// Tokens in the conversation after the reply: everything the model
+    /// was given (cached or not) plus what it wrote.
+    pub context: u64,
+}
+
+/// The size of a conversation after its latest reply, from the usage
+/// Claude Code records with each one. `None` before the first reply.
+pub fn usage(path: &Path) -> Option<Usage> {
+    let text = read_tail(path)?;
+    text.lines().rev().filter(|line| line.contains("\"usage\"")).find_map(|line| {
+        let record = serde_json::from_str::<Value>(line).ok()?;
+        if record["type"] != "assistant" {
+            return None;
+        }
+        let message = &record["message"];
+        let used = &message["usage"];
+        let count = |key: &str| used[key].as_u64().unwrap_or(0);
+        let context = count("input_tokens")
+            + count("cache_creation_input_tokens")
+            + count("cache_read_input_tokens")
+            + count("output_tokens");
+        // Messages the agent makes up itself (an interrupted turn) report
+        // nothing.
+        let model = message["model"].as_str().filter(|model| !model.starts_with('<'));
+        (context > 0).then(|| Usage { model: model.map(|model| clean(model, 60)), context })
+    })
 }
 
 fn read_record(record: &Value, out: &mut Vec<Entry>) {
@@ -182,6 +219,29 @@ mod tests {
         assert_eq!(tail(&path, 2).len(), 2);
         assert_eq!(tail(&path, 2)[1], Entry::Text("Redirects are built in `src/auth.rs`.".into()));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn usage_comes_from_the_latest_reply() {
+        let reply = |model: &str, tokens: [u64; 4]| {
+            let [input, write, read, output] = tokens;
+            json!({ "type": "assistant", "message": { "model": model, "content": [{ "type": "text", "text": "hi" }],
+                "usage": { "input_tokens": input, "cache_creation_input_tokens": write, "cache_read_input_tokens": read, "output_tokens": output } } })
+        };
+        let mut records = sample();
+        records.push(reply("claude-sonnet-5-5", [10, 20, 30, 40]));
+        records.push(reply("claude-opus-5-5", [3, 1_000, 340_000, 900]));
+        // An interrupted turn, and a prompt after it, change nothing.
+        records.push(reply("<synthetic>", [0, 0, 0, 0]));
+        records.push(json!({ "type": "user", "message": { "content": "next" } }));
+        let path = write("usage", &records);
+        assert_eq!(usage(&path), Some(Usage { model: Some("claude-opus-5-5".into()), context: 341_903 }));
+        // Nothing replied yet, or no file at all.
+        let quiet = write("usage-quiet", &sample());
+        assert_eq!(usage(&quiet), None);
+        assert_eq!(usage(Path::new("/nonexistent/x.jsonl")), None);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(quiet);
     }
 
     #[test]

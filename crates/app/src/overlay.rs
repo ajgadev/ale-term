@@ -92,6 +92,8 @@ pub enum Overlay {
     Menu(Box<crate::menu::Menu>),
     /// The screen of usage statistics; the app holds what it shows.
     Usage,
+    /// The map of an agent and its subagents; the app holds what it shows.
+    AgentMap,
     /// The board of agents, with the selected card's column and row.
     Board {
         selected: (usize, usize),
@@ -119,6 +121,7 @@ impl Overlay {
                 | Overlay::Settings { .. }
                 | Overlay::Menu(_)
                 | Overlay::Usage
+                | Overlay::AgentMap
         )
     }
 
@@ -129,7 +132,12 @@ impl Overlay {
                 Some(query)
             }
             Overlay::Settings { editing, .. } => editing.as_mut(),
-            Overlay::None | Overlay::Confirm(_) | Overlay::Board { .. } | Overlay::Menu(_) | Overlay::Usage => None,
+            Overlay::None
+            | Overlay::Confirm(_)
+            | Overlay::Board { .. }
+            | Overlay::Menu(_)
+            | Overlay::Usage
+            | Overlay::AgentMap => None,
         }
     }
 }

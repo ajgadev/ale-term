@@ -34,6 +34,54 @@ pub struct Node {
     pub elapsed: String,
     /// Finished nodes are drawn subdued.
     pub running: bool,
+    /// The model its latest reply came from, shown by name ("Opus 5.5").
+    pub model: Option<String>,
+    /// Tokens in its conversation so far, when its record says.
+    pub tokens: Option<u64>,
+}
+
+impl Node {
+    /// How big its conversation is: "348.9K in context" for the agent,
+    /// "269.5K tokens" for what it launched. Empty when unknown.
+    pub fn tokens_text(&self) -> String {
+        match (self.tokens, self.depth) {
+            (None, _) => String::new(),
+            (Some(tokens), 0) => format!("{} in context", crate::usage::compact(tokens)),
+            (Some(tokens), _) => format!("{} tokens", crate::usage::compact(tokens)),
+        }
+    }
+
+    /// Its kind, with the model for the agent itself: "Claude Code · Opus 5.5".
+    pub fn heading(&self) -> String {
+        match (&self.model, self.depth) {
+            (Some(model), 0) => format!("{} · {model}", self.title),
+            _ => self.title.clone(),
+        }
+    }
+}
+
+/// A running time to the second, as "11m 27s" or "2h 5m".
+pub fn long_elapsed(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+/// Each node's parent: the nearest node before it one level shallower.
+/// Nodes come in tree order (see [`tree_order`]), so that is the one that
+/// launched it.
+pub fn parents(nodes: &[Node]) -> Vec<Option<usize>> {
+    (0..nodes.len())
+        .map(|index| {
+            let depth = nodes[index].depth;
+            if depth == 0 {
+                return None;
+            }
+            (0..index).rev().find(|earlier| nodes[*earlier].depth + 1 == depth)
+        })
+        .collect()
 }
 
 /// How a line of output is styled.
@@ -202,17 +250,11 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, palette: &P
     let layout = layout(model, area, cell, scale);
 
     // Connectors first, so boxes sit on top of them: from each node an
-    // elbow up to the nearest earlier node one level shallower.
-    for (position, placed) in layout.nodes.iter().enumerate() {
-        let node = &model.nodes[placed.index];
-        if node.depth == 0 {
-            continue;
-        }
-        let parent = layout.nodes[..position]
-            .iter()
-            .rev()
-            .find(|earlier| model.nodes[earlier.index].depth + 1 == node.depth);
-        let Some(parent) = parent else { continue };
+    // elbow up to the node that launched it.
+    let parents = parents(&model.nodes);
+    for placed in &layout.nodes {
+        let Some(parent) = parents[placed.index] else { continue };
+        let Some(parent) = layout.nodes.iter().find(|earlier| earlier.index == parent) else { continue };
         let x = parent.rect.x + (layout.indent / 2.0).round();
         let mid = placed.rect.y + (placed.rect.h / 2.0).round();
         let top = parent.rect.y + parent.rect.h;
@@ -239,12 +281,24 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, palette: &P
         let title_color = if node.running { fg } else { dim };
 
         let elapsed_width = r.text_width(&node.elapsed);
-        let title = fit(&node.title, inner_width - elapsed_width - cell.0, cell.0);
+        let title = fit(&node.heading(), inner_width - elapsed_width - cell.0, cell.0);
         r.text(&title, true, inner_x, first, inner_width, title_color);
         r.text(&node.elapsed, false, inner_x + inner_width - elapsed_width, first, elapsed_width, dim);
         r.text(&fit(&node.detail, inner_width, cell.0), false, inner_x, second, inner_width, title_color);
+        // How big its conversation is, at the right of the status, unless
+        // that would leave the status too little room.
+        let mut tokens = node.tokens_text();
+        let mut tokens_width = r.text_width(&tokens);
+        if !tokens.is_empty() && inner_width - tokens_width < cell.0 * 14.0 {
+            tokens.clear();
+            tokens_width = 0.0;
+        }
+        let status_room = if tokens.is_empty() { inner_width } else { inner_width - tokens_width - cell.0 * 2.0 };
         let status_color = if node.running { color(node.color) } else { dim };
-        r.text(&fit(&node.status, inner_width, cell.0), false, inner_x, third, inner_width, status_color);
+        r.text(&fit(&node.status, status_room, cell.0), false, inner_x, third, status_room, status_color);
+        if !tokens.is_empty() {
+            r.text(&tokens, false, inner_x + inner_width - tokens_width, third, tokens_width, dim);
+        }
     }
     let hidden = model.nodes.len() - layout.nodes.len();
     if hidden > 0 {
@@ -307,7 +361,34 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             elapsed: "5s".into(),
             running: true,
+            model: None,
+            tokens: None,
         }
+    }
+
+    #[test]
+    fn each_node_hangs_from_the_one_that_launched_it() {
+        let depths = [0, 1, 2, 2, 3, 1];
+        let nodes: Vec<Node> = depths.iter().map(|depth| node(NodeId::Main, *depth)).collect();
+        assert_eq!(parents(&nodes), [None, Some(0), Some(1), Some(1), Some(3), Some(0)]);
+    }
+
+    #[test]
+    fn running_times_are_given_to_the_second() {
+        assert_eq!(long_elapsed(9), "9s");
+        assert_eq!(long_elapsed(687), "11m 27s");
+        assert_eq!(long_elapsed(7_500), "2h 5m");
+    }
+
+    #[test]
+    fn tokens_and_model_are_described() {
+        let mut agent = Node { model: Some("Opus 5.5".into()), tokens: Some(348_900), ..node(NodeId::Main, 0) };
+        agent.title = "Claude Code".into();
+        assert_eq!(agent.heading(), "Claude Code · Opus 5.5");
+        assert_eq!(agent.tokens_text(), "349K in context");
+        let sub = Node { tokens: Some(1_200), ..node(NodeId::Subagent("a".into()), 1) };
+        assert_eq!((sub.heading().as_str(), sub.tokens_text().as_str()), ("Explore", "1.2K tokens"));
+        assert_eq!(node(NodeId::Main, 1).tokens_text(), "");
     }
 
     #[test]

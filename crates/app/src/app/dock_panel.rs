@@ -19,6 +19,13 @@ pub struct DockState {
     pub hovered: Option<Hit>,
 }
 
+/// The subagents an agent has at work, oldest first: each one's kind and
+/// what it was asked to do.
+fn running_subagents(session: &ale_agents::Session) -> Vec<(&str, &str)> {
+    let running = session.subagents.iter().filter(|subagent| subagent.finished.is_none());
+    running.map(|subagent| (subagent.kind.as_str(), subagent.description.as_str())).collect()
+}
+
 impl App {
     pub(super) fn board_layout(&self) -> bool {
         self.config.agents.layout == AgentLayout::Board
@@ -81,6 +88,7 @@ impl App {
                     icon: self.agent_icon(session),
                     tab: tab.custom_title.clone(),
                     progress: session.shown_plan().progress(),
+                    subagents: board::subagents_line(&running_subagents(session)),
                 });
             }
         }

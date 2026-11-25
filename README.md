@@ -17,8 +17,9 @@ open, and a first frame in about 120 ms.
   cards docked above the tabs.
 - **A start page for new sessions**: type a task, pick one of the agents
   installed on this Mac, and refer to files with `@`.
-- **The agent graph**: Claude Code's subagents and background tasks as a
-  tree, with what each was asked and what it answered.
+- **The agent map and graph**: Claude Code's subagents and background tasks
+  as a tree, with what each was asked, how long it has run, how many tokens
+  it has used and what it answered.
 - **A complete terminal underneath**: workspaces with templates, session
   restore, search, prompt jumping, inline images and Cmd-click links.
 
@@ -135,6 +136,7 @@ of its name. In the shortcuts, ⌘ is Command, ⇧ Shift, ⌥ Option and ⌃ Con
 | Open Settings File |  |
 | Quit ale-term | `⌘Q` |
 | **Other** | |
+| Agent Map | `⌥⌘M` |
 | Agent Usage | `⌥⌘U` |
 
 <!-- commands:end -->
@@ -335,13 +337,29 @@ settings); scroll over a column to see the rest of its cards. Its height
 stays the same as agents come and go, so the terminals below are not
 resized. The agent in the focused pane is outlined; click a card to go to
 it. A tab you have named (double-click it) shows its name beside the
-agent's, here and in the summary card: "Claude Code · api server".
+agent's, here and in the summary card: "Claude Code · api server". While an
+agent has subagents at work, its card says so in place of its status
+("↳ 2 subagents · Map the inbox"); click the card to see them in the graph.
+
+**Agent map** (Option+Cmd+M, or the tree button in the tab bar, left of the
+usage button): the agent in the focused pane and everything it launched, on
+a screen of its own, drawn left to right: the agent, then its subagents,
+then theirs. Each box shows what it was asked to do, its model (for the
+agent itself), how long it has run, how many tokens its conversation holds
+and what it is doing now. While the focused agent has subagents at work,
+the button turns orange and shows how many. Click a box to go to its
+agent's terminal with the graph panel open on that box, where its output
+can be read; scroll or use the arrow keys when the tree is larger than the
+window, and Escape to close it. Like the graph, it needs Claude Code's
+status hooks.
 
 **Graph** (Option+Cmd+G, or click an agent in the sidebar that has
 subagents): a panel beside the agent's terminal showing the agent, the
 subagents it launched, the ones those launched in turn, and its background
 tasks, as a tree. Each node shows what it was asked to do and what it is
-doing now, or its final answer once finished. Click a node to read its
+doing now, or its final answer once finished, with how many tokens its
+conversation holds (for the agent: how many are in its context, and its
+model). Those are read from the usage Claude Code records with each reply. Click a node to read its
 recent output below the tree: what it was asked, what it said, and the tools
 it called. This works for Claude Code with status hooks installed; the
 output is read from Claude Code's own conversation files under `~/.claude`.

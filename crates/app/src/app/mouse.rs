@@ -103,10 +103,16 @@ impl App {
             return;
         }
 
-        // The usage screen takes every click.
+        // The usage screen takes every click, and so does the agent map.
         if matches!(self.overlay, Overlay::Usage) {
             if mouse_button == MouseButton::Left {
                 self.usage_click(x, y);
+            }
+            return;
+        }
+        if matches!(self.overlay, Overlay::AgentMap) {
+            if mouse_button == MouseButton::Left {
+                self.map_click(x, y);
             }
             return;
         }
@@ -246,6 +252,7 @@ impl App {
                 (TabBarHit::Commands, MouseButton::Left) => self.perform(Action::CommandPalette, event_loop),
                 (TabBarHit::Split, MouseButton::Left) => self.open_split_menu(),
                 (TabBarHit::Usage, MouseButton::Left) => self.perform(Action::ShowUsage, event_loop),
+                (TabBarHit::Map, MouseButton::Left) => self.perform(Action::ShowAgentMap, event_loop),
                 (TabBarHit::Empty, MouseButton::Left) => {
                     let clicks = self.register_click();
                     if let Some(window) = &self.window {
@@ -443,6 +450,7 @@ impl App {
                             | TabBarHit::Commands
                             | TabBarHit::Split
                             | TabBarHit::Usage
+                            | TabBarHit::Map
                     )
                 })
         };
@@ -476,8 +484,8 @@ impl App {
         if matches!(self.overlay, Overlay::Menu(_)) {
             self.menu_hover(x, y);
         }
-        // The usage screen lights up what is under the pointer.
-        if matches!(self.overlay, Overlay::Usage) {
+        // The usage screen and the map light up what is under the pointer.
+        if matches!(self.overlay, Overlay::Usage | Overlay::AgentMap) {
             self.redraw();
         }
         // The tabs sit in the window's title bar, where the system would
@@ -528,6 +536,7 @@ impl App {
             }
             Overlay::Confirm(_) => return CursorIcon::Default,
             Overlay::Usage => return hand(self.usage_hit(x, y).is_some_and(|hit| hit.clickable())),
+            Overlay::AgentMap => return hand(self.map_hit(x, y).is_some()),
             Overlay::Board { .. } => {
                 let area = self.content_rect();
                 if area.contains(x, y) {
@@ -759,6 +768,13 @@ impl App {
     pub(super) fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
         let (x, y) = (self.mouse.x, self.mouse.y);
         let Some(cell_height) = self.renderer.as_ref().map(|r| r.metrics().height) else { return };
+        if matches!(self.overlay, Overlay::AgentMap) {
+            let (dx, dy) = match delta {
+                MouseScrollDelta::LineDelta(x, y) => (x * cell_height * 3.0, y * cell_height * 3.0),
+                MouseScrollDelta::PixelDelta(position) => (position.x as f32, position.y as f32),
+            };
+            return self.map_scroll(dx, dy);
+        }
         if self.sidebar_rect().is_some_and(|rect| rect.contains(x, y)) {
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => lines * cell_height * 3.0,

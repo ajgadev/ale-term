@@ -14,6 +14,7 @@ mod boxdraw;
 mod chrome;
 mod dock;
 mod draw;
+mod agent_map;
 mod graph;
 mod icons;
 mod input;

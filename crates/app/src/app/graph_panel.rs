@@ -2,6 +2,7 @@
 //! (the focused agent, its subagents and background tasks, and the selected
 //! node's recent output), and handling clicks on it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -10,7 +11,7 @@ use ale_agents::{AgentState, Session};
 
 use super::*;
 use crate::graph::{self, Model, Node, NodeId, OutputKind};
-use crate::sidebar::{self, state_color};
+use crate::sidebar::state_color;
 
 /// How many transcript entries the output view keeps.
 const OUTPUT_ENTRIES: usize = 80;
@@ -27,6 +28,9 @@ pub struct GraphState {
     pub shown: bool,
     /// When the panel is next redrawn to pick up new output.
     refresh: Option<Instant>,
+    /// How big each conversation is, by transcript, and the state of the
+    /// file when that was read.
+    usage: HashMap<PathBuf, ((u64, SystemTime), Option<transcript::Usage>)>,
 }
 
 /// Only conversation records under the agent's own folder are read. The
@@ -101,10 +105,13 @@ impl App {
         self.graph.visible = true;
     }
 
-    fn graph_nodes(&self, pane: &Pane, session: &Session) -> Vec<Node> {
+    /// The agent, its subagents and its background tasks, in tree order,
+    /// with the record each one's conversation is kept in.
+    fn graph_nodes(&self, pane: &Pane, session: &Session) -> (Vec<Node>, Vec<Option<PathBuf>>) {
         let now = Instant::now();
-        let elapsed = |since: Instant, until: Instant| sidebar::format_elapsed(until.duration_since(since).as_secs());
+        let elapsed = |since: Instant, until: Instant| graph::long_elapsed(until.duration_since(since).as_secs());
         let palette = &self.palette;
+        let mut transcripts = vec![session.transcript.clone()];
         let mut nodes = vec![Node {
             id: NodeId::Main,
             depth: 0,
@@ -114,6 +121,8 @@ impl App {
             color: state_color(session.state, palette),
             elapsed: elapsed(session.since, now),
             running: true,
+            model: None,
+            tokens: None,
         }];
 
         let position = |id: &str| session.subagents.iter().position(|subagent| subagent.id == id);
@@ -138,7 +147,10 @@ impl App {
                 color: state_color(state, palette),
                 elapsed: elapsed(subagent.started, subagent.finished.unwrap_or(now)),
                 running,
+                model: None,
+                tokens: None,
             });
+            transcripts.push(subagent.transcript.clone());
         }
         for task in &session.background_tasks {
             nodes.push(Node {
@@ -150,18 +162,52 @@ impl App {
                 color: state_color(AgentState::Waiting, palette),
                 elapsed: String::new(),
                 running: true,
+                model: None,
+                tokens: None,
             });
+            transcripts.push(None);
         }
-        nodes
+        (nodes, transcripts)
+    }
+
+    /// The tree for the agent in a pane, each node with its model and how
+    /// big its conversation is.
+    pub(super) fn agent_nodes(&mut self, pane_id: PaneId) -> Option<Vec<Node>> {
+        let pane = self.panes.get(&pane_id)?;
+        let (mut nodes, transcripts) = self.graph_nodes(pane, pane.agent.as_ref()?);
+        for (node, path) in nodes.iter_mut().zip(transcripts) {
+            if let Some(usage) = path.and_then(|path| self.transcript_usage(&path)) {
+                node.model = usage.model.as_deref().map(crate::usage::model_name);
+                node.tokens = Some(usage.context);
+            }
+        }
+        Some(nodes)
+    }
+
+    /// What a conversation record says about its size. Read again only
+    /// when the file has changed.
+    fn transcript_usage(&mut self, path: &Path) -> Option<transcript::Usage> {
+        let stamp = transcript::stamp(path)?;
+        if let Some((seen, usage)) = self.graph.usage.get(path)
+            && *seen == stamp
+        {
+            return usage.clone();
+        }
+        let usage = if readable(path) { transcript::usage(path) } else { None };
+        // Records of sessions long gone are not kept forever.
+        if self.graph.usage.len() >= 64 {
+            self.graph.usage.clear();
+        }
+        self.graph.usage.insert(path.to_owned(), (stamp, usage.clone()));
+        usage
     }
 
     /// Gathers everything the panel draws. Rereads the selected node's
     /// transcript only if the file has changed since the last frame.
     pub(super) fn graph_model(&mut self) -> Option<Model> {
         let pane_id = self.graph_pane()?;
-        let pane = self.panes.get(&pane_id)?;
-        let session = pane.agent.as_ref()?;
-        let nodes = self.graph_nodes(pane, session);
+        let nodes = self.agent_nodes(pane_id)?;
+        let session = self.panes.get(&pane_id)?.agent.as_ref()?;
 
         // A selection that no longer exists (its turn ended) falls back to
         // the agent itself.
@@ -224,15 +270,17 @@ impl App {
         }
     }
 
-    /// While the panel shows an agent that is busy, redraws it every so
-    /// often so new output appears without waiting for the next status
-    /// report. Returns when it wants to run next.
+    /// While the panel or the map shows an agent that is busy, redraws it
+    /// every so often so new output, times and tokens appear without
+    /// waiting for the next status report. Returns when it wants to run
+    /// next.
     pub(super) fn refresh_graph(&mut self) -> Option<Instant> {
         let busy = self
             .graph_pane()
             .and_then(|id| self.panes.get(&id)?.agent.as_ref())
             .is_some_and(|session| session.state == AgentState::Working || session.running_subagents() > 0);
-        if !busy || self.graph_width() <= 0.0 {
+        let busy = (busy && self.graph_width() > 0.0) || self.map_busy();
+        if !busy {
             self.graph.refresh = None;
             return None;
         }

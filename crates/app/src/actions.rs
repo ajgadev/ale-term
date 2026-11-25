@@ -30,6 +30,7 @@ pub enum Action {
     ClearArchive,
     /// The screen of usage statistics.
     ShowUsage,
+    ShowAgentMap,
     NextAttention,
     SetUpHooks,
     RemoveHooks,
@@ -83,6 +84,7 @@ pub const COMMANDS: &[(Action, &str, &str)] = &[
     (Action::SwitchLayout, "Switch Layout: Sidebar / Board", "⌥⌘B"),
     (Action::ToggleBoard, "Toggle Agent Board", "⇧⌘B"),
     (Action::ToggleGraph, "Toggle Agent Graph", "⌥⌘G"),
+    (Action::ShowAgentMap, "Agent Map", "⌥⌘M"),
     (Action::NewAgentSession, "New Agent Session", "⇧⌘T"),
     (Action::ShowArchive, "Resume Archived Session", ""),
     (Action::ClearArchive, "Clear Session Archive", ""),
@@ -183,6 +185,7 @@ pub fn from_key(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Optio
         "f" => Action::Find,
         "g" if alt => Action::ToggleGraph,
         "u" if alt => Action::ShowUsage,
+        "m" if alt => Action::ShowAgentMap,
         "g" if shift => Action::FindPrevious,
         "g" => Action::FindNext,
         "p" if shift => Action::CommandPalette,

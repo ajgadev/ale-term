@@ -44,6 +44,8 @@ pub struct TabBar {
     pub split: Rect,
     /// The button that shows the agents' usage, left of the split button.
     pub usage: Rect,
+    /// The button that shows the agent map, left of the usage button.
+    pub map: Rect,
 }
 
 /// The layout each half of the switch stands for.
@@ -69,6 +71,8 @@ pub struct TabBarView<'a> {
     /// A tab whose title is being edited: its position, the text so far,
     /// and whether that text is selected (typing then replaces it).
     pub editing: Option<(usize, &'a str, bool)>,
+    /// Subagents at work for the focused agent, counted on the map button.
+    pub subagents: usize,
 }
 
 /// What a tab shows.
@@ -97,6 +101,8 @@ pub enum TabBarHit {
     Split,
     /// The button that shows the agents' usage.
     Usage,
+    /// The button that shows the agent map.
+    Map,
     /// Empty space, used for dragging the window.
     Empty,
 }
@@ -133,7 +139,8 @@ impl TabBar {
         let commands = Rect::new(switch_x - inset - segment, top + inset, segment, height - inset * 2.0);
         let split = Rect::new(commands.x - inset - segment, top + inset, segment, height - inset * 2.0);
         let usage = Rect::new(split.x - inset - segment, top + inset, segment, height - inset * 2.0);
-        let available = (usage.x - inset - left - button).max(0.0);
+        let map = Rect::new(usage.x - inset - segment, top + inset, segment, height - inset * 2.0);
+        let available = (map.x - inset - left - button).max(0.0);
         let width = (available / tab_count.max(1) as f32).min(TAB_MAX_WIDTH * scale).floor();
 
         let tabs: Vec<Rect> = (0..tab_count)
@@ -162,6 +169,7 @@ impl TabBar {
             commands,
             split,
             usage,
+            map,
         }
     }
 
@@ -184,6 +192,9 @@ impl TabBar {
         }
         if self.usage.contains(x, y) {
             return Some(TabBarHit::Usage);
+        }
+        if self.map.contains(x, y) {
+            return Some(TabBarHit::Map);
         }
         if let Some(index) = self.close.iter().position(|close| close.contains(x, y)) {
             return Some(TabBarHit::Close(index));
@@ -208,7 +219,7 @@ impl TabBar {
     /// Draws the bar. Returns whether a hovered title is scrolling, and so
     /// needs drawing again shortly.
     pub fn draw(&self, r: &mut Renderer, view: &TabBarView, scale: f32, palette: &Palette) -> bool {
-        let TabBarView { workspace, titles, active, hovered, dragged, layout, hover_seconds, editing } = *view;
+        let TabBarView { workspace, titles, active, hovered, dragged, layout, hover_seconds, editing, subagents } = *view;
         // The dragged tab leaves its slot and follows the pointer, kept
         // within the row of tabs; nothing reacts to the pointer meanwhile.
         let dragged = dragged.filter(|(index, _)| *index < self.tabs.len());
@@ -386,7 +397,54 @@ impl TabBar {
         r.text("⌘", false, glyph_x, glyph_y, commands.w, color(ink));
         self.draw_split_button(r, hovered == Some(TabBarHit::Split), scale, palette);
         self.draw_usage_button(r, hovered == Some(TabBarHit::Usage), scale, palette);
+        self.draw_map_button(r, hovered == Some(TabBarHit::Map), subagents, scale, palette);
         scrolling
+    }
+
+    /// The map button: a small tree, one box branching into two, framed
+    /// like its neighbours. While subagents are at work the tree turns the
+    /// accent color and their count stands beside it.
+    fn draw_map_button(&self, r: &mut Renderer, over: bool, subagents: usize, scale: f32, palette: &Palette) {
+        let line = scale.round().max(1.0);
+        let button = self.map;
+        outline(r, button, line, color(palette.border));
+        if over {
+            r.rect(button.x + line, button.y + line, button.w - line * 2.0, button.h - line * 2.0, color(palette.border));
+        }
+        let busy = subagents > 0;
+        let ink = color(match (busy, over) {
+            (true, _) => palette.accent,
+            (false, true) => palette.foreground,
+            (false, false) => palette.chrome_text_dim,
+        });
+        let count = match subagents {
+            0 => String::new(),
+            1..=9 => subagents.to_string(),
+            _ => "9+".to_owned(),
+        };
+        let count_width = if busy { r.text_width(&count) + line * 2.0 } else { 0.0 };
+        let (w, h) = ((13.0 * scale).round(), (11.0 * scale).round());
+        let (node, small) = ((4.0 * scale).round(), (3.0 * scale).round());
+        let x = button.x + ((button.w - w - count_width) / 2.0).round();
+        let y = button.y + ((button.h - h) / 2.0).round();
+        // The parent on the left, level with the middle; two children on
+        // the right, top and bottom, joined by an elbow.
+        let middle = y + ((h - node) / 2.0).round();
+        r.rect(x, middle, node, node, ink);
+        let bend = x + node + ((w - node - small) / 2.0).round();
+        r.rect(x + node, middle + ((node - line) / 2.0).round(), bend - x - node, line, ink);
+        let (top_mid, bottom_mid) = (y + ((small - line) / 2.0).round(), y + h - small + ((small - line) / 2.0).round());
+        r.rect(bend, top_mid, line, bottom_mid - top_mid + line, ink);
+        for child_y in [y, y + h - small] {
+            let mid = child_y + ((small - line) / 2.0).round();
+            r.rect(bend, mid, x + w - small - bend, line, ink);
+            r.rect(x + w - small, child_y, small, small, ink);
+        }
+        if busy {
+            let metrics = r.metrics();
+            let text_y = button.y + ((button.h - metrics.height) / 2.0).round();
+            r.text(&count, true, x + w + line * 2.0, text_y, count_width, ink);
+        }
     }
 
     /// The usage button: a small bar chart, framed like its neighbours.
@@ -540,7 +598,7 @@ mod tests {
         assert_eq!(crowded.hit(first.x + first.w - 2.0, 10.0), Some(TabBarHit::Tab(0)));
         assert_eq!(bar.hit(500.0, 10.0), Some(TabBarHit::Tab(1)));
         assert_eq!(bar.hit(670.0, 10.0), Some(TabBarHit::NewTab));
-        assert_eq!(bar.hit(800.0, 10.0), Some(TabBarHit::Empty));
+        assert_eq!(bar.hit(760.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(20.0, 10.0), Some(TabBarHit::Empty));
         assert_eq!(bar.hit(100.0, 60.0), None);
     }
@@ -550,9 +608,11 @@ mod tests {
         let bar = TabBar::layout(3, 1000.0, 1.0, (0.0, 0.0), true, 72.0);
         let [sidebar, board] = bar.switch;
         assert!(board.x + board.w <= 1000.0 && sidebar.x + sidebar.w <= board.x + 0.5);
-        assert!(bar.new_tab.x + bar.new_tab.w <= bar.usage.x);
+        assert!(bar.new_tab.x + bar.new_tab.w <= bar.map.x);
+        assert!(bar.map.x + bar.map.w <= bar.usage.x);
         assert!(bar.usage.x + bar.usage.w <= bar.split.x);
         assert_eq!(bar.hit(bar.usage.x + 3.0, 19.0), Some(TabBarHit::Usage));
+        assert_eq!(bar.hit(bar.map.x + 3.0, 19.0), Some(TabBarHit::Map));
         // The command menu's button is just left of the switch, and the
         // split button left of that.
         assert!(bar.commands.x + bar.commands.w <= sidebar.x);

@@ -149,6 +149,9 @@ impl App {
         let summary = self.summary_model();
         let pointer = (self.mouse.x, self.mouse.y);
         let board = matches!(self.overlay, Overlay::Board { .. }).then(|| (self.content_rect(), self.board_model()));
+        let map = matches!(self.overlay, Overlay::AgentMap).then(|| self.map_view());
+        let map_scroll = self.map.scroll;
+        let subagents_here = self.running_subagents_here();
         let active_position = visible.iter().position(|i| *i == self.active).unwrap_or(0);
         // A tab being renamed shows the name typed so far.
         let renaming: Option<(usize, String, bool)> =
@@ -266,6 +269,7 @@ impl App {
             layout: self.config.agents.layout,
             hover_seconds: self.mouse.hover_tab_since.elapsed().as_secs_f32(),
             editing: rename_view,
+            subagents: subagents_here,
         };
         self.tab_scrolling = tab_bar.draw(renderer, &view, scale, palette);
         if let Some((rect, model)) = &graph {
@@ -340,6 +344,12 @@ impl App {
             Overlay::Usage => {
                 let top = TabBar::height(scale);
                 crate::usage::draw(renderer, &self.usage.view(pointer), window, scale, top, palette);
+            }
+            Overlay::AgentMap => {
+                if let Some((nodes, summary, note)) = map {
+                    let view = crate::agent_map::View { nodes: &nodes, summary, note, scroll: map_scroll, pointer };
+                    crate::agent_map::draw(renderer, &view, window, scale, TabBar::height(scale), palette);
+                }
             }
             Overlay::None => {}
         }

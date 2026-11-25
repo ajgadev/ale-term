@@ -10,6 +10,7 @@ mod agents;
 mod dock_panel;
 mod frame;
 mod graph_panel;
+mod map_panel;
 mod menus;
 mod mouse;
 mod overlays;
@@ -217,6 +218,7 @@ pub struct App {
     archive: ale_agents::Archive,
     sidebar: agents::SidebarState,
     graph: graph_panel::GraphState,
+    map: map_panel::MapState,
     dock: dock_panel::DockState,
     usage: usage_panel::UsageState,
     /// Claude Code's settings already contain our status hooks.
@@ -308,6 +310,7 @@ impl App {
             archive,
             sidebar: agents::SidebarState { visible: sidebar_visible, ..Default::default() },
             graph: graph_panel::GraphState::default(),
+            map: map_panel::MapState::default(),
             dock: dock_panel::DockState::default(),
             usage: usage_panel::UsageState::default(),
             claude_hooks: false,
@@ -864,6 +867,7 @@ impl App {
                 self.redraw();
             }
             Action::ShowUsage => self.toggle_usage(),
+            Action::ShowAgentMap => self.toggle_agent_map(),
             Action::NextAttention => self.next_attention(),
             Action::SetUpHooks => self.offer_hooks(ale_agents::AgentKind::Claude),
             Action::RemoveHooks => self.remove_hooks(ale_agents::AgentKind::Claude),

@@ -45,6 +45,32 @@ pub struct Card {
     pub tab: Option<String>,
     /// Items of its plan done, and in all, when it has one.
     pub progress: Option<(usize, usize)>,
+    /// Its subagents at work, e.g. "↳ 2 subagents · Map the inbox", shown
+    /// in place of its status while there are any.
+    pub subagents: Option<String>,
+}
+
+impl Card {
+    /// What the card's last line says the agent is doing, and whether that
+    /// is its subagents.
+    pub fn doing(&self) -> (&str, bool) {
+        match &self.subagents {
+            Some(subagents) => (subagents, true),
+            None => (&self.status, false),
+        }
+    }
+}
+
+/// The line a card shows while an agent has subagents at work: the one
+/// subagent's kind and task, or how many there are and the first one's task.
+pub fn subagents_line(running: &[(&str, &str)]) -> Option<String> {
+    match running {
+        [] => None,
+        [(kind, "")] => Some(format!("↳ {kind}")),
+        [(kind, task)] => Some(format!("↳ {kind}: {task}")),
+        [(_, ""), ..] => Some(format!("↳ {} subagents", running.len())),
+        [(_, task), ..] => Some(format!("↳ {} subagents · {task}", running.len())),
+    }
 }
 
 /// How far along a plan is, as "3/7".
@@ -242,9 +268,13 @@ pub fn draw(r: &mut Renderer, model: &Model, area: Rect, scale: f32, palette: &P
         draw_agent_name(r, &card.agent, card.tab.as_deref(), (inner_x, first), name_room, cell.0, dim, fg);
         r.text(&card.elapsed, false, inner_x + inner_width - elapsed_width, first, elapsed_width, dim);
         r.text(&fit(&card.title, inner_width, cell.0), true, inner_x, second, inner_width, fg);
-        let detail = format!("{} · {}", card.project, card.status);
-        let detail_color =
-            if card.state == AgentState::Working { dim } else { color(state_color(card.state, palette)) };
+        let (doing, subagents) = card.doing();
+        let detail = format!("{} · {doing}", card.project);
+        let detail_color = match (subagents, card.state) {
+            (true, _) => color(state_color(AgentState::Working, palette)),
+            (false, AgentState::Working) => dim,
+            (false, state) => color(state_color(state, palette)),
+        };
         // A plan's progress at the end of the line, and as a bar.
         let count = card.progress.map(progress_text).unwrap_or_default();
         let count_width = r.text_width(&count);
@@ -284,7 +314,21 @@ mod tests {
             icon: 0,
             tab: None,
             progress: None,
+            subagents: None,
         }
+    }
+
+    #[test]
+    fn running_subagents_are_summed_up_in_a_line() {
+        assert_eq!(subagents_line(&[]), None);
+        assert_eq!(subagents_line(&[("Explore", "Map the inbox")]).as_deref(), Some("↳ Explore: Map the inbox"));
+        assert_eq!(subagents_line(&[("Explore", "")]).as_deref(), Some("↳ Explore"));
+        let two = [("Explore", "Map the inbox"), ("Plan", "Draft it")];
+        assert_eq!(subagents_line(&two).as_deref(), Some("↳ 2 subagents · Map the inbox"));
+        let mut card = card(1, AgentState::Working);
+        assert_eq!(card.doing(), ("Editing", false));
+        card.subagents = subagents_line(&two);
+        assert_eq!(card.doing(), ("↳ 2 subagents · Map the inbox", true));
     }
 
     fn model() -> Model {
