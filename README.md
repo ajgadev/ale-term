@@ -369,6 +369,17 @@ subagent or stop one, so the graph is for watching. When a subagent's
 request needs your approval the prompt appears in the agent's terminal,
 which is right beside the panel.
 
+**Agent usage** (Option+Cmd+U, or the chart button in the tab bar): how much
+the agents have been used over the last 7, 30 or 90 days, or all time, for
+every workspace or one: tokens, tasks, turns and working time, tokens by day,
+the hours they work, and a breakdown by model and by agent (click an agent to
+see only its usage). Scroll down for **Top tasks**, the conversations active
+in that period that used the most tokens. Each row shows the task's title, its
+workspace and when it began, its model, working time, turns, subagents, and
+input and output tokens for the whole conversation. Claude Code titles are
+read from its own records when shown and are not stored. Kiro and OpenCode
+tasks show their working time only.
+
 **Archive**: when an agent's session ends it is filed under "Archived" at
 the bottom of the sidebar. Picking one opens a tab in the folder it ran in;
 Claude Code sessions are resumed with `claude --resume <id>`, and for other
@@ -477,7 +488,7 @@ What it stores, all under `~/.config/ale-term/`:
 | `state/session.json` | Open workspaces, tabs, splits, folders and running command lines, for restoring |
 | `state/archive.json` | Ended agent sessions: task name, agent, folder, session id |
 | `state/approved.json` | Per-project template files you allowed to run |
-| `state/usage.json` | Usage totals per hour, agent, project folder and model (numbers only), and how far each agent record has been read |
+| `state/usage.json` | Usage totals per hour, agent, project folder and model, and per task (the path of its record and numbers only), and how far each agent record has been read |
 | `state/activity.jsonl` | For Kiro and OpenCode, whose records it cannot read: when each stretch of work in an ale-term pane ended, how long it lasted and in which folder |
 | `shell-integration/` | The zsh script it loads |
 

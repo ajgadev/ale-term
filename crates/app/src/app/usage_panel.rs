@@ -2,10 +2,12 @@
 //! in the background, choosing what it shows, and its keys and clicks.
 
 use ale_agents::AgentState;
-use ale_agents::usage::{JOURNAL, Query, Report, Store, Stretch};
+use std::collections::HashMap;
+
+use ale_agents::usage::{JOURNAL, Query, Report, Store, Stretch, TaskUse};
 
 use super::*;
-use crate::usage::{self, Hit, MenuRow, RANGES, Sizes, View};
+use crate::usage::{self, Hit, MenuRow, RANGES, Sizes, TaskLabel, View};
 
 pub struct UsageState {
     /// The totals; loaded when the screen first opens.
@@ -26,6 +28,12 @@ pub struct UsageState {
     /// The workspace menu's rows, and the project each one stands for.
     rows: Vec<MenuRow>,
     projects: Vec<Option<String>>,
+    /// How the report's tasks are named, and the titles read from their
+    /// records so far (kept only while the screen is in use).
+    labels: Vec<TaskLabel>,
+    titles: HashMap<String, Option<String>>,
+    /// How far the screen is scrolled down, in pixels.
+    scroll: f32,
 }
 
 impl Default for UsageState {
@@ -41,6 +49,9 @@ impl Default for UsageState {
             report: None,
             rows: Vec::new(),
             projects: Vec::new(),
+            labels: Vec::new(),
+            titles: HashMap::new(),
+            scroll: 0.0,
         }
     }
 }
@@ -60,6 +71,9 @@ pub struct Activity {
     hour: Option<u64>,
     /// The agent last stopped to ask the user something.
     answered: bool,
+    /// What the journal calls the session, so that its stretches add up
+    /// to one task.
+    session: Option<String>,
 }
 
 /// Work that picks up this soon after it stopped is the same turn: an
@@ -79,9 +93,37 @@ impl UsageState {
             rows: &self.rows,
             menu: self.menu,
             agent: self.agent.as_deref(),
+            labels: &self.labels,
+            scroll: self.scroll,
             pointer,
         }
     }
+}
+
+/// A time as the local date and time of day: "Nov 24, 14:05".
+fn local_time(millis: u64) -> String {
+    let seconds = millis / 1000;
+    let local = seconds as i64 + utc_offset(seconds);
+    let minutes = local.rem_euclid(86_400) / 60;
+    format!("{}, {:02}:{:02}", usage::day_name(local.div_euclid(86_400), false), minutes / 60, minutes % 60)
+}
+
+/// How a task is named: the title its agent gave it, when its record
+/// still has one, and its workspace and when it began.
+fn task_label(task: &TaskUse, titles: &mut HashMap<String, Option<String>>) -> TaskLabel {
+    let title = titles
+        .entry(task.record.clone())
+        .or_insert_with(|| {
+            let path = Path::new(&task.record);
+            let claude = task.agent == ale_agents::AgentKind::Claude.slug();
+            if claude && super::graph_panel::readable(path) { ale_agents::transcript::title(path) } else { None }
+        })
+        .clone();
+    let agent = ale_agents::AgentKind::from_slug(&task.agent).map_or(task.agent.as_str(), |kind| kind.name());
+    let title = title.unwrap_or_else(|| format!("{agent} task"));
+    let workspace =
+        if task.project.is_empty() { workspace::GENERAL.to_owned() } else { workspace::root_name(Path::new(&task.project)) };
+    TaskLabel { title, detail: format!("{workspace} · {}", local_time(task.first)) }
 }
 
 /// Local time's distance from UTC at a time, in seconds.
@@ -139,6 +181,7 @@ impl App {
                 task: !std::mem::replace(&mut activity.counted, true),
                 turn,
                 active: activity.hour.replace(hour) != Some(hour),
+                session: Some(activity.session.get_or_insert_with(|| format!("{pane_id}-{time}")).clone()),
             };
             activity.ended = Some(now);
             if let Some(dir) = &self.state_dir
@@ -161,6 +204,7 @@ impl App {
             self.usage.store = self.state_dir.as_deref().map(Store::load);
         }
         self.usage.menu = None;
+        self.usage.scroll = 0.0;
         self.refresh_usage();
         self.overlay = Overlay::Usage;
         self.scan_usage();
@@ -199,6 +243,8 @@ impl App {
     pub(super) fn usage_scanned(&mut self, store: Store) {
         self.usage.scanning = false;
         self.usage.store = Some(store);
+        // Titles may have changed with what the agents wrote since.
+        self.usage.titles.clear();
         if matches!(self.overlay, Overlay::Usage) {
             self.refresh_usage();
             self.redraw();
@@ -210,6 +256,7 @@ impl App {
         let state = &mut self.usage;
         let Some(store) = state.store.as_ref().filter(|store| !store.is_empty() || !state.scanning) else {
             state.report = None;
+            state.labels.clear();
             return;
         };
         let now = std::time::SystemTime::now()
@@ -222,6 +269,7 @@ impl App {
             report = store.report(&everyone, &utc_offset);
             state.agent = None;
         }
+        state.labels = report.tasks.iter().map(|task| task_label(task, &mut state.titles)).collect();
         state.report = Some(report);
 
         // The workspace menu: everything, then each project used in these
@@ -272,6 +320,8 @@ impl App {
     }
 
     fn open_usage_menu(&mut self) {
+        // The menu hangs from the header, which has to be in view.
+        self.usage.scroll = 0.0;
         let selected = self.usage.rows.iter().position(|row| row.checked).unwrap_or(0);
         let first = usage::menu_scroll(selected, 0, self.usage_menu_room());
         self.usage.menu = Some((selected, first));
@@ -315,9 +365,34 @@ impl App {
         self.redraw();
     }
 
+    /// Scrolls the screen by a wheel or trackpad movement, or a key.
+    pub(super) fn usage_scroll(&mut self, dy: f32) {
+        let Some(layout) = self.usage_layout() else { return };
+        // The layout holds the scroll within what it can be.
+        let scroll = (layout.scroll() - dy).clamp(0.0, layout.max_scroll());
+        if scroll != self.usage.scroll {
+            self.usage.scroll = scroll;
+            self.redraw();
+        }
+    }
+
     /// Keys of the usage screen. Returns whether the key was one of them.
     pub(super) fn usage_key(&mut self, event: &KeyEvent) -> bool {
         let Key::Named(key) = &event.logical_key else { return false };
+        if self.usage.menu.is_none() {
+            let page = self.window_size().1 * 0.8;
+            let step = match key {
+                NamedKey::PageUp => Some(page),
+                NamedKey::PageDown | NamedKey::Space => Some(-page),
+                NamedKey::Home => Some(f32::MAX),
+                NamedKey::End => Some(-f32::MAX),
+                _ => None,
+            };
+            if let Some(step) = step {
+                self.usage_scroll(step);
+                return true;
+            }
+        }
         match (key, self.usage.menu) {
             (NamedKey::Escape, Some(_)) => self.usage.menu = None,
             (NamedKey::ArrowUp | NamedKey::ArrowDown, Some((selected, first))) => {

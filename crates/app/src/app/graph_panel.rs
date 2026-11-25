@@ -38,7 +38,7 @@ pub struct GraphState {
 ///
 /// Both sides are resolved first, so neither `..` nor a link inside the
 /// folder can lead out of it.
-fn readable(path: &Path) -> bool {
+pub(super) fn readable(path: &Path) -> bool {
     let Some(home) = std::env::var_os("HOME") else { return false };
     inside(path, &Path::new(&home).join(".claude"))
 }

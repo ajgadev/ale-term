@@ -775,6 +775,13 @@ impl App {
             };
             return self.map_scroll(dx, dy);
         }
+        if matches!(self.overlay, Overlay::Usage) {
+            let pixels = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => lines * cell_height * 3.0,
+                MouseScrollDelta::PixelDelta(position) => position.y as f32,
+            };
+            return self.usage_scroll(pixels);
+        }
         if self.sidebar_rect().is_some_and(|rect| rect.contains(x, y)) {
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => lines * cell_height * 3.0,

@@ -16,6 +16,9 @@
 //!   agent's next reply, so time spent waiting for the user does not count;
 //! * **input** tokens include what was read from and written to the cache.
 //!
+//! Each task's own totals are kept too, for the list of the biggest ones,
+//! under the path of its record: still no words, only numbers.
+//!
 //! The record format is internal to Claude Code and may change. Lines that
 //! are not understood are skipped.
 
@@ -42,6 +45,12 @@ const RECENT_IDS: usize = 8;
 
 /// How deep below the records folder files are looked for.
 const DEPTH: usize = 5;
+
+/// How many tasks' totals are kept: the most recently active ones.
+const KEPT_TASKS: usize = 1000;
+
+/// How many tasks a report lists.
+const LISTED_TASKS: usize = 25;
 
 /// Tokens used with one model, in one hour.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -113,12 +122,37 @@ struct Mark {
     count: u64,
 }
 
+/// One task's totals, from the start of its conversation.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+struct Task {
+    agent: String,
+    project: String,
+    /// The model of its latest reply.
+    model: String,
+    /// Its first and latest activity, in milliseconds since 1970.
+    first: u64,
+    last: u64,
+    /// Working time, in milliseconds.
+    millis: u64,
+    turns: u64,
+    /// Input tokens, cached or not.
+    input: u64,
+    output: u64,
+    /// Subagents it launched, going by their records.
+    subagents: u64,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct StoreFile {
     version: u32,
     files: BTreeMap<String, Mark>,
     buckets: Vec<Bucket>,
+    tasks: BTreeMap<String, Task>,
+    /// The tasks were added up from the records already read. Totals kept
+    /// before tasks were counted lack them until they are read again.
+    tasks_read: bool,
 }
 
 /// The totals, and how far each record has been read.
@@ -126,6 +160,11 @@ struct StoreFile {
 pub struct Store {
     files: BTreeMap<String, Mark>,
     buckets: BTreeMap<(u64, String, String), Bucket>,
+    /// Each task's totals, by the path of its record (or its journal id).
+    tasks: BTreeMap<String, Task>,
+    tasks_read: bool,
+    /// The task whose lines are being read.
+    current: Option<String>,
     /// Where it is stored; `None` keeps it in memory only.
     path: Option<PathBuf>,
 }
@@ -145,7 +184,7 @@ impl Store {
             .into_iter()
             .map(|bucket| ((bucket.hour, bucket.agent.clone(), bucket.project.clone()), bucket))
             .collect();
-        Store { files: file.files, buckets, path: Some(path) }
+        Store { files: file.files, buckets, tasks: file.tasks, tasks_read: file.tasks_read, current: None, path: Some(path) }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -158,6 +197,8 @@ impl Store {
             version: VERSION,
             files: self.files.clone(),
             buckets: self.buckets.values().cloned().collect(),
+            tasks: self.tasks.clone(),
+            tasks_read: self.tasks_read,
         };
         let json = serde_json::to_string(&file).map_err(std::io::Error::other)?;
         if let Some(dir) = path.parent() {
@@ -189,6 +230,9 @@ impl Store {
     /// read. `project_of` names the project a folder belongs to. Returns
     /// whether anything changed.
     pub fn scan(&mut self, home: &Path, journal: Option<&Path>, project_of: &dyn Fn(&Path) -> Option<PathBuf>) -> bool {
+        // Totals kept before tasks were counted: read everything again,
+        // once, for the tasks alone.
+        let backfill = !self.tasks_read && !self.files.is_empty();
         let mut projects = Projects { known: HashMap::new(), project_of };
         let mut changed = self.scan_records(&home.join(".claude").join("projects"), Reader::Claude, &mut projects);
         changed |= self.scan_records(&home.join(".codex").join("sessions"), Reader::Codex, &mut projects);
@@ -196,7 +240,38 @@ impl Store {
         if let Some(journal) = journal {
             changed |= self.scan_records(journal, Reader::Journal, &mut projects);
         }
+        if backfill {
+            let mut fresh = Store { tasks_read: true, ..Store::default() };
+            fresh.scan(home, journal, project_of);
+            self.tasks = fresh.tasks;
+        }
+        if !std::mem::replace(&mut self.tasks_read, true) {
+            changed = true;
+        }
+        if self.tasks.len() > KEPT_TASKS {
+            let mut latest: Vec<u64> = self.tasks.values().map(|task| task.last).collect();
+            latest.sort_unstable_by(|a, b| b.cmp(a));
+            let oldest = latest[KEPT_TASKS - 1];
+            self.tasks.retain(|_, task| task.last >= oldest);
+        }
         changed
+    }
+
+    /// The task whose lines are being read, made at `time` if it is new.
+    fn task(&mut self, agent: AgentKind, time: u64, project: &str) -> Option<&mut Task> {
+        let key = self.current.as_ref()?;
+        let task = self.tasks.entry(key.clone()).or_insert_with(|| Task {
+            agent: agent.slug().to_owned(),
+            first: time,
+            last: time,
+            ..Task::default()
+        });
+        task.first = task.first.min(time);
+        task.last = task.last.max(time);
+        if task.project.is_empty() {
+            task.project = project.to_owned();
+        }
+        Some(task)
     }
 
     /// Reads what is new in one agent's records under `root`, a folder or
@@ -213,6 +288,8 @@ impl Store {
             let key = path.to_string_lossy().into_owned();
             let mut mark = self.files.get(&key).cloned().unwrap_or_default();
             let before = mark.clone();
+            // A subagent's work belongs to its conversation's task.
+            self.current = if *nested { conversation_of(path, reader) } else { Some(key.clone()) };
             match reader {
                 // Older Gemini records are one document, written anew
                 // each time; only its new messages are counted.
@@ -253,10 +330,17 @@ impl Store {
                 }
             }
             if mark != before {
+                if *nested
+                    && before == Mark::default()
+                    && let Some(task) = self.current.as_ref().and_then(|current| self.tasks.get_mut(current))
+                {
+                    task.subagents += 1;
+                }
                 self.files.insert(key, mark);
                 changed = true;
             }
         }
+        self.current = None;
         // Records that are gone need no bookmark.
         let known = self.files.len();
         self.files.retain(|key, _| {
@@ -270,12 +354,14 @@ impl Store {
     fn work(&mut self, mark: &mut Mark, agent: AgentKind, time: u64, project: &str) {
         let hour = time / HOUR_MS;
         let bucket = self.bucket(hour, agent, project);
-        if let Some(last) = mark.last.replace(time) {
-            bucket.millis += time.saturating_sub(last).min(LONGEST_STEP_MS);
-        }
+        let step = mark.last.replace(time).map_or(0, |last| time.saturating_sub(last).min(LONGEST_STEP_MS));
+        bucket.millis += step;
         if mark.hour != Some(hour) {
             mark.hour = Some(hour);
             bucket.sessions += 1;
+        }
+        if let Some(task) = self.task(agent, time, project) {
+            task.millis += step;
         }
     }
 
@@ -288,7 +374,8 @@ impl Store {
         if main && !std::mem::replace(&mut mark.started, true) {
             bucket.tasks += 1;
         }
-        if main && std::mem::take(&mut mark.pending) {
+        let turn = main && std::mem::take(&mut mark.pending);
+        if turn {
             bucket.turns += 1;
         }
         let tokens = bucket.models.entry(model.to_owned()).or_default();
@@ -299,6 +386,14 @@ impl Store {
         if main && !mark.models.iter().any(|known| known == model) {
             mark.models.push(model.to_owned());
             tokens.tasks += 1;
+        }
+        if let Some(task) = self.task(agent, time, project) {
+            task.turns += u64::from(turn);
+            task.input += used.all_input();
+            task.output += used.output;
+            if main {
+                task.model = model.to_owned();
+            }
         }
     }
 
@@ -480,6 +575,15 @@ impl Store {
         bucket.tasks += u64::from(stretch.task);
         bucket.turns += u64::from(stretch.turn);
         bucket.sessions += u64::from(stretch.active);
+        // Older journals do not say which session a stretch belongs to.
+        let Some(session) = stretch.session else { return };
+        self.current = Some(format!("journal:{session}"));
+        if let Some(task) = self.task(agent, stretch.time.saturating_sub(stretch.millis), &project) {
+            task.last = task.last.max(stretch.time);
+            task.millis += stretch.millis;
+            task.turns += u64::from(stretch.turn);
+        }
+        self.current = None;
     }
 }
 
@@ -532,6 +636,8 @@ pub struct Stretch {
     pub turn: bool,
     /// It is the session's first in this hour.
     pub active: bool,
+    /// Which session it belongs to: the same for all its stretches.
+    pub session: Option<String>,
 }
 
 /// Name of the journal in ale-term's state folder.
@@ -559,6 +665,19 @@ pub fn append_stretch(path: &Path, stretch: &Stretch) -> std::io::Result<()> {
     let mut line = serde_json::to_string(stretch).map_err(std::io::Error::other)?;
     line.push('\n');
     options.open(path)?.write_all(line.as_bytes())
+}
+
+/// The record of the conversation a subagent's record belongs to: Claude
+/// Code keeps them in `<conversation>/subagents/`, beside
+/// `<conversation>.jsonl`.
+fn conversation_of(record: &Path, reader: Reader) -> Option<String> {
+    if reader != Reader::Claude {
+        return None;
+    }
+    let subagents = record.ancestors().find(|folder| folder.file_name().is_some_and(|name| name == "subagents"))?;
+    let conversation = subagents.parent()?;
+    let name = conversation.file_name()?.to_string_lossy();
+    Some(conversation.with_file_name(format!("{name}.jsonl")).to_string_lossy().into_owned())
 }
 
 /// The folder a Gemini CLI chat record belongs to: Gemini keeps each
@@ -884,6 +1003,31 @@ pub struct ProjectUse {
     pub tokens: u64,
 }
 
+/// One task's totals, for the list of the biggest ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskUse {
+    /// The path of its record; for agents whose records are not read, an
+    /// id starting with "journal:".
+    pub record: String,
+    /// The agent's short name.
+    pub agent: String,
+    /// The project folder; empty for folders outside any project.
+    pub project: String,
+    /// The model of its latest reply; empty when not known.
+    pub model: String,
+    /// When it began and when it was last active, in milliseconds since
+    /// 1970.
+    pub first: u64,
+    pub last: u64,
+    /// Working time, in milliseconds.
+    pub millis: u64,
+    pub turns: u64,
+    /// Input tokens, cached or not.
+    pub input: u64,
+    pub output: u64,
+    pub subagents: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     /// The first and last day covered, in local days since 1970.
@@ -907,6 +1051,10 @@ pub struct Report {
     /// Every project used in these days, whichever the query asks for.
     /// Most used first.
     pub projects: Vec<ProjectUse>,
+    /// The tasks active in these days that used the most tokens (or, for
+    /// agents whose tokens are not known, the most time). Their totals
+    /// are their whole conversations', also from before these days.
+    pub tasks: Vec<TaskUse>,
 }
 
 impl Store {
@@ -988,6 +1136,34 @@ impl Store {
         report.projects =
             projects.into_iter().map(|(project, tokens)| ProjectUse { project: project.to_owned(), tokens }).collect();
         report.projects.sort_by_key(|project| std::cmp::Reverse(project.tokens));
+
+        let local_day = |millis: u64| {
+            let seconds = millis / 1000;
+            (seconds as i64 + utc_offset(seconds)).div_euclid(DAY)
+        };
+        let mut tasks: Vec<TaskUse> = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| (first_day..=today).contains(&local_day(task.last)))
+            .filter(|(_, task)| query.project.is_none_or(|project| task.project == project))
+            .filter(|(_, task)| query.agent.is_none_or(|agent| task.agent == agent))
+            .map(|(record, task)| TaskUse {
+                record: record.clone(),
+                agent: task.agent.clone(),
+                project: task.project.clone(),
+                model: task.model.clone(),
+                first: task.first,
+                last: task.last,
+                millis: task.millis,
+                turns: task.turns,
+                input: task.input,
+                output: task.output,
+                subagents: task.subagents,
+            })
+            .collect();
+        tasks.sort_by_key(|task| std::cmp::Reverse((task.input + task.output, task.millis, task.last)));
+        tasks.truncate(LISTED_TASKS);
+        report.tasks = tasks;
         report
     }
 }
@@ -1031,7 +1207,7 @@ mod tests {
     }
 
     fn counted(lines: &[String], subagent: bool) -> Store {
-        let mut store = Store::default();
+        let mut store = Store { current: Some("abc.jsonl".into()), ..Store::default() };
         let mut mark = Mark::default();
         let mut projects = Projects { known: HashMap::new(), project_of: &project };
         for line in lines {
@@ -1380,6 +1556,7 @@ mod tests {
             task: true,
             turn: true,
             active: true,
+            session: Some("7".into()),
         };
         append_stretch(&journal, &stretch).unwrap();
         append_stretch(&journal, &Stretch { time: time + 90_000, millis: 30_000, task: false, active: false, ..stretch.clone() }).unwrap();
@@ -1392,11 +1569,64 @@ mod tests {
         assert_eq!(report.total, Totals { tasks: 1, turns: 2, millis: 90_000, ..Totals::default() });
         assert_eq!(report.agents, [AgentUse { agent: "kiro".into(), input: 0, output: 0, millis: 90_000 }]);
         assert_eq!((report.busiest_hour, report.models.len()), (1, 0));
+        let task = &report.tasks[0];
+        assert_eq!((task.agent.as_str(), task.project.as_str(), task.millis, task.turns), ("kiro", "/work/app", 90_000, 2));
+        assert_eq!((task.first, task.last), (time - 60_000, time + 90_000));
+        assert_eq!(report.tasks.len(), 1);
         // More is added later; what was read is not read again.
         assert!(!store.scan(&dir, Some(&journal), &projects_by_parent()));
         append_stretch(&journal, &Stretch { time: time + 200_000, millis: 1000, task: false, ..stretch }).unwrap();
         assert!(store.scan(&dir, Some(&journal), &projects_by_parent()));
         assert_eq!(store.report(&query, &|_| 0).total.millis, 91_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_task_adds_up_its_own_work_and_its_subagents() {
+        let dir = scratch("tasks");
+        let session = dir.join(".claude").join("projects").join("-work-app");
+        std::fs::create_dir_all(session.join("abc").join("subagents")).unwrap();
+        std::fs::write(session.join("abc.jsonl"), format!("{}\n", conversation().join("\n"))).unwrap();
+        let helper = reply("2026-11-20T10:00:15.000Z", "s", "claude-haiku-5-5", "end_turn", [5, 0, 0, 7]);
+        std::fs::write(session.join("abc").join("subagents").join("agent-1.jsonl"), format!("{helper}\n")).unwrap();
+        let small = [user("2026-11-20T09:00:00.000Z", r#""hi""#), reply("2026-11-20T09:00:01.000Z", "x", "claude-opus-5-5", "end_turn", [1, 0, 0, 1])];
+        std::fs::write(session.join("def.jsonl"), format!("{}\n", small.join("\n"))).unwrap();
+
+        let mut store = Store::default();
+        assert!(store.scan(&dir, None, &projects_by_parent()));
+        let week = Query { days: Some(7), now: noon(NOV_20), ..Query::default() };
+        let report = store.report(&week, &|_| 0);
+        let record = |name: &str| session.join(name).to_string_lossy().into_owned();
+        assert_eq!(
+            report.tasks[0],
+            TaskUse {
+                record: record("abc.jsonl"),
+                agent: "claude".into(),
+                project: "/work/app".into(),
+                model: "claude-fable-5-2".into(),
+                first: parse_time("2026-11-20T10:00:10.000Z").unwrap(),
+                last: parse_time("2026-11-20T11:30:05.000Z").unwrap(),
+                millis: 35_000,
+                turns: 2,
+                input: 4206 + 5,
+                output: 87,
+                subagents: 1,
+            }
+        );
+        assert_eq!((report.tasks[1].record.as_str(), report.tasks[1].output), (record("def.jsonl").as_str(), 1));
+        assert_eq!(report.tasks.len(), 2);
+        // Only the tasks active in the days asked for, by the agent asked for.
+        let later = Query { days: Some(1), now: noon(NOV_20 + 3), ..Query::default() };
+        assert!(store.report(&later, &|_| 0).tasks.is_empty());
+        assert!(store.report(&Query { agent: Some("codex"), ..week }, &|_| 0).tasks.is_empty());
+
+        // Totals kept from before tasks were counted get them, once.
+        store.tasks.clear();
+        store.tasks_read = false;
+        assert!(store.scan(&dir, None, &projects_by_parent()));
+        assert_eq!(store.report(&week, &|_| 0), report);
+        assert!(!store.scan(&dir, None, &projects_by_parent()));
+        assert_eq!(store.report(&week, &|_| 0), report);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

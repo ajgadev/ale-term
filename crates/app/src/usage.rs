@@ -1,12 +1,12 @@
 //! The usage screen: how much the agents have been used, over the whole
-//! window. Totals, tokens by day, when the agents work, and a breakdown by
-//! model and by agent.
+//! window. Totals, tokens by day, when the agents work, a breakdown by
+//! model and by agent, and below them the tasks that used the most.
 //!
 //! The app supplies the numbers (a [`View`]); this module lays them out,
 //! draws them and says what is under the pointer.
 
 use ale_agents::AgentKind;
-use ale_agents::usage::{Report, Totals, date_from_days};
+use ale_agents::usage::{Report, TaskUse, Totals, date_from_days};
 use ale_config::{Palette, Rgb};
 use ale_render::{Color, Renderer};
 
@@ -27,6 +27,14 @@ pub struct MenuRow {
     pub checked: bool,
 }
 
+/// How a task is named in the list: its title, and where and when it
+/// ran. Made by the app, which can read the records and the local time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskLabel {
+    pub title: String,
+    pub detail: String,
+}
+
 /// What the screen shows.
 pub struct View<'a> {
     /// The numbers; `None` until they have been read for the first time.
@@ -42,6 +50,10 @@ pub struct View<'a> {
     pub menu: Option<(usize, usize)>,
     /// Short name of the only agent on show, if one was picked.
     pub agent: Option<&'a str>,
+    /// How each of the report's tasks is named.
+    pub labels: &'a [TaskLabel],
+    /// How far the screen is scrolled down, in pixels.
+    pub scroll: f32,
     pub pointer: (f32, f32),
 }
 
@@ -79,8 +91,11 @@ const NUMBER_CHARS: f32 = 9.0;
 pub struct Layout {
     cell: (f32, f32),
     scale: f32,
-    /// The whole screen's content area.
+    /// The whole screen's content area, on screen whatever the scroll.
     frame: Rect,
+    /// How far down the screen is scrolled, and the most it can be.
+    scroll: f32,
+    max_scroll: f32,
     title: (f32, f32),
     close: Rect,
     ranges: [Rect; 4],
@@ -92,6 +107,7 @@ pub struct Layout {
     heat: (Rect, Rect),
     models: (Rect, Rect),
     agents: (Rect, Rect),
+    tasks: (Rect, Rect),
     /// The tokens chart's bars: the area they fill and how many there are.
     plot: Rect,
     bars: usize,
@@ -100,6 +116,7 @@ pub struct Layout {
     heat_step: (f32, f32),
     model_rows: Vec<Rect>,
     agent_rows: Vec<Rect>,
+    task_rows: Vec<Rect>,
 }
 
 /// What a layout depends on besides the window.
@@ -109,10 +126,13 @@ pub struct Sizes {
     pub days: usize,
     pub models: usize,
     pub agents: usize,
+    pub tasks: usize,
     /// Characters in the workspace's name.
     pub workspace_chars: usize,
     /// The open workspace menu: number of rows and the first one shown.
     pub menu: Option<(usize, usize)>,
+    /// How far the screen is scrolled down, in pixels.
+    pub scroll: f32,
 }
 
 impl Sizes {
@@ -121,16 +141,30 @@ impl Sizes {
             days: view.report.map_or(0, |report| report.days.len()),
             models: view.report.map_or(0, |report| report.models.len()),
             agents: view.report.map_or(0, |report| report.agents.len()),
+            tasks: view.report.map_or(0, |report| report.tasks.len()),
             workspace_chars: view.workspace.chars().count(),
             menu: view.menu.map(|(_, first)| (view.rows.len(), first)),
+            scroll: view.scroll,
         }
     }
 }
 
 impl Layout {
     /// `top` is the height of the window's title bar, which the screen
-    /// leaves clear.
+    /// leaves clear. The first screenful is laid out to fit the window,
+    /// with the top of the task list showing below it; the rest of the
+    /// list is further down.
     pub fn new(window: (f32, f32), cell: (f32, f32), scale: f32, top: f32, sizes: Sizes) -> Layout {
+        let page = Layout::scrolled(window, cell, scale, top, sizes, 0.0);
+        let scroll = sizes.scroll.clamp(0.0, page.max_scroll).round();
+        if scroll > 0.0 { Layout::scrolled(window, cell, scale, top, sizes, scroll) } else { page }
+    }
+
+    /// The layout with everything moved up by `scroll` pixels.
+    fn scrolled(window: (f32, f32), cell: (f32, f32), scale: f32, top: f32, sizes: Sizes, scroll: f32) -> Layout {
+        let screen_top = top;
+        let top = top - scroll;
+        let bottom = window.1 - scroll;
         let px = |points: f32| (points * scale).round();
         let pad = px(24.0);
         let gap = px(16.0);
@@ -165,11 +199,19 @@ impl Layout {
         let tiles = std::array::from_fn(|i| Rect::new(pad + (tile_w + gap) * i as f32, y, tile_w, tile_h));
         y += tile_h + (gap * 1.5).round();
 
-        // Two rows of two sections share what is left.
-        let rest = (window.1 - pad - y).max(cell.1 * 12.0);
+        // Two rows of two sections share what is left, but for the top of
+        // the task list, which shows that there is more below.
         let between = (gap * 1.5).round();
+        let peek = heading + row * 2.5;
+        let rest = (bottom - pad - y - between - peek).max(cell.1 * 12.0);
         let middle_h = (rest * 0.42).clamp(cell.1 * 7.0, cell.1 * 16.0).round();
-        let bottom_h = (rest - middle_h - between).max(cell.1 * 4.0);
+        // The tables need no more than their rows.
+        let models_head = px(6.0) + px(10.0) + cell.1 + px(8.0) + cell.1 + px(4.0);
+        let agents_head = cell.1 + px(4.0);
+        let needed = heading
+            + (models_head + row * sizes.models.max(1) as f32).max(agents_head + row * sizes.agents.max(1) as f32)
+            + px(8.0);
+        let bottom_h = (rest - middle_h - between).min(needed.max(cell.1 * 8.0)).max(cell.1 * 4.0).round();
         let column_gap = gap * 2.0;
         let chart_w = ((width - column_gap) * 0.58).round();
         let heat_x = pad + chart_w + column_gap;
@@ -179,9 +221,14 @@ impl Layout {
         };
         let chart = section(pad, y, chart_w, middle_h);
         let heat = section(heat_x, y, right - heat_x, middle_h);
-        let bottom = y + middle_h + between;
-        let models = section(pad, bottom, half, bottom_h);
-        let agents = section(right - half, bottom, half, bottom_h);
+        let lower = y + middle_h + between;
+        let models = section(pad, lower, half, bottom_h);
+        let agents = section(right - half, lower, half, bottom_h);
+        // The task list: column titles, then a row a task.
+        let tasks_y = lower + bottom_h + between;
+        let tasks_h = heading + cell.1 + px(4.0) + row * sizes.tasks.max(1) as f32;
+        let tasks = section(pad, tasks_y, width, tasks_h);
+        let max_scroll = (tasks_y + tasks_h + pad + scroll - window.1).max(0.0).round();
 
         // The chart: amounts on the left, dates below.
         let labels = cell.0 * 9.0;
@@ -209,6 +256,8 @@ impl Layout {
         let model_rows: Vec<Rect> = rows(models_top, models.1, sizes.models);
         let agents_top = agents.1.y + cell.1 + px(4.0);
         let agent_rows: Vec<Rect> = rows(agents_top, agents.1, sizes.agents);
+        let tasks_top = tasks.1.y + cell.1 + px(4.0);
+        let task_rows = (0..sizes.tasks).map(|i| Rect::new(tasks.1.x, tasks_top + row * i as f32, tasks.1.w, row)).collect();
 
         // The workspace menu hangs below its button, inside the window.
         let menu = sizes.menu.map(|(count, first)| {
@@ -224,7 +273,9 @@ impl Layout {
         Layout {
             cell,
             scale,
-            frame: Rect::new(pad, top, width, window.1 - top),
+            frame: Rect::new(pad, screen_top, width, window.1 - screen_top),
+            scroll,
+            max_scroll,
             title,
             close,
             ranges,
@@ -235,19 +286,35 @@ impl Layout {
             heat,
             models,
             agents,
+            tasks,
             plot,
             bars,
             heat_origin,
             heat_step: (step_x, step_y),
             model_rows,
             agent_rows,
+            task_rows,
         }
+    }
+
+    /// The most the screen can be scrolled down, in pixels.
+    pub fn max_scroll(&self) -> f32 {
+        self.max_scroll
+    }
+
+    /// How far it is scrolled, within what it can be.
+    pub fn scroll(&self) -> f32 {
+        self.scroll
     }
 
     /// What is at a window position. An open menu takes everything.
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
         if let Some((_, rows)) = &self.menu {
             return rows.iter().find(|(_, rect)| rect.contains(x, y)).map(|(index, _)| Hit::MenuRow(*index));
+        }
+        // What has scrolled up under the title bar is out of reach.
+        if y < self.frame.y {
+            return None;
         }
         if self.close.contains(x, y) {
             return Some(Hit::Close);
@@ -541,19 +608,25 @@ pub fn draw(r: &mut Renderer, view: &View, window: (f32, f32), scale: f32, top: 
         palette,
     };
     pen.fill(Rect::new(0.0, 0.0, window.0, window.1), color(palette.background));
-
+    // What scrolls up stops at the title bar.
+    pen.r.set_clip(Some([0.0, layout.frame.y, window.0, (window.1 - layout.frame.y).max(0.0)]));
     header(&mut pen, view, &layout, hover);
-    let Some(report) = view.report else {
-        let text = if view.scanning { "Reading the agents' records…" } else { "No usage has been recorded yet" };
-        pen.centered(text, layout.frame, pen.dim);
-        return;
-    };
-    tiles(&mut pen, report, &layout);
-    chart(&mut pen, report, &layout, hover);
-    heat(&mut pen, report, &layout, hover);
-    models(&mut pen, report, &layout);
-    agents(&mut pen, view, report, &layout, hover);
-    menu(&mut pen, view, &layout, hover);
+    match view.report {
+        Some(report) => {
+            tiles(&mut pen, report, &layout);
+            chart(&mut pen, report, &layout, hover);
+            heat(&mut pen, report, &layout, hover);
+            models(&mut pen, report, &layout);
+            agents(&mut pen, view, report, &layout, hover);
+            tasks(&mut pen, view, report, &layout);
+            menu(&mut pen, view, &layout, hover);
+        }
+        None => {
+            let text = if view.scanning { "Reading the agents' records…" } else { "No usage has been recorded yet" };
+            pen.centered(text, layout.frame, pen.dim);
+        }
+    }
+    pen.r.set_clip(None);
 }
 
 fn header(pen: &mut Pen, view: &View, layout: &Layout, hover: Option<Hit>) {
@@ -948,6 +1021,123 @@ fn agents(pen: &mut Pen, view: &View, report: &Report, layout: &Layout, hover: O
     }
 }
 
+/// A column of the task list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Column {
+    Share,
+    Model,
+    Time,
+    Turns,
+    Subagents,
+    Input,
+    Output,
+}
+
+/// The task list's columns that fit `cells` characters, left to right,
+/// each with its width in characters. The tokens and the time always do.
+fn task_columns(cells: f32) -> Vec<(Column, f32)> {
+    let number = NUMBER_CHARS;
+    let wanted = [
+        (Column::Share, 14.0, 140.0),
+        (Column::Model, 14.0, 118.0),
+        (Column::Time, number, 0.0),
+        (Column::Turns, number - 2.0, 88.0),
+        (Column::Subagents, number + 2.0, 102.0),
+        (Column::Input, number, 0.0),
+        (Column::Output, number, 0.0),
+    ];
+    wanted.into_iter().filter(|(_, _, least)| cells >= *least).map(|(column, width, _)| (column, width)).collect()
+}
+
+fn tasks(pen: &mut Pen, view: &View, report: &Report, layout: &Layout) {
+    let (heading, body) = layout.tasks;
+    let note = if report.tasks.is_empty() { "" } else { "most tokens first · totals of whole conversations" };
+    pen.heading(heading, "TOP TASKS", note);
+    if report.tasks.is_empty() {
+        pen.left("No tasks in this period", false, body.x, body.y + pen.px(6.0), body.w, pen.dim);
+        return;
+    }
+    // Where each column ends, laid out from the right.
+    let columns = task_columns(body.w / pen.cell.0);
+    let mut edge = body.x + body.w;
+    let mut placed: Vec<(Column, f32, f32)> = Vec::new();
+    for (column, width) in columns.iter().rev() {
+        let width = width * pen.cell.0;
+        placed.push((*column, edge - width, edge));
+        edge -= width;
+    }
+    placed.reverse();
+    let names_end = edge - pen.cell.0 * 2.0;
+    for (column, left, right) in &placed {
+        let title = match column {
+            Column::Share => continue,
+            Column::Model => {
+                pen.left("model", false, left + pen.cell.0 * 2.0, body.y, right - left, pen.dim);
+                continue;
+            }
+            Column::Time => "time",
+            Column::Turns => "turns",
+            Column::Subagents => "subagents",
+            Column::Input => "input",
+            Column::Output => "output",
+        };
+        pen.right(title, false, *right, body.y, pen.dim);
+    }
+    let weight = |task: &TaskUse| task.input + task.output;
+    let most = report.tasks.iter().map(weight).max().unwrap_or(1).max(1);
+    let number = |count: u64, text: fn(u64) -> String| if count == 0 { "—".to_owned() } else { text(count) };
+    for (index, rect) in layout.task_rows.iter().enumerate() {
+        let Some(task) = report.tasks.get(index) else { break };
+        if index % 2 == 1 {
+            let stripe = pen.faint(8);
+            pen.fill(*rect, stripe);
+        }
+        let y = rect.y + ((rect.h - pen.cell.1) / 2.0).round();
+        let side = pen.cell.1.round();
+        let kind = AgentKind::from_slug(&task.agent);
+        if let Some(kind) = kind {
+            pen.r.image(crate::icons::key(kind), rect.x + pen.px(4.0), y, side, side, [0.0, 0.0, 1.0, 1.0]);
+        }
+        // The title, and where and when as far as there is room.
+        let x = rect.x + pen.px(4.0) + side + pen.cell.0;
+        let room = (names_end - x).max(0.0);
+        let label = view.labels.get(index).cloned().unwrap_or_default();
+        let detail_width = pen.r.text_width(&label.detail);
+        let title_room = if detail_width > 0.0 { room - (detail_width + pen.cell.0 * 2.0).min(room * 0.4) } else { room };
+        let used = pen.left(&label.title, false, x, y, title_room, pen.fg);
+        let detail_x = x + used + pen.cell.0 * 2.0;
+        if names_end - detail_x >= pen.cell.0 * 6.0 {
+            pen.left(&label.detail, false, detail_x, y, names_end - detail_x, pen.dim);
+        }
+        let middle = rect.y + rect.h / 2.0;
+        for (column, left, right) in &placed {
+            let text = match column {
+                Column::Share => {
+                    if weight(task) > 0 {
+                        let bar = right - left - pen.cell.0;
+                        let width = (bar * weight(task) as f32 / most as f32).max(pen.px(2.0));
+                        let fill = color(maker_color(maker(&task.model), pen.palette));
+                        pen.pill(*left, middle, width.min(bar), pen.px(6.0), fill);
+                    }
+                    continue;
+                }
+                Column::Model => {
+                    let name = if task.model.is_empty() { "—".to_owned() } else { model_name(&task.model) };
+                    pen.left(&name, false, left + pen.cell.0 * 2.0, y, right - left - pen.cell.0 * 2.0, pen.dim);
+                    continue;
+                }
+                Column::Time => duration(task.millis),
+                Column::Turns => number(task.turns, grouped),
+                Column::Subagents => number(task.subagents, grouped),
+                Column::Input => number(task.input, compact),
+                Column::Output => number(task.output, compact),
+            };
+            let fill = if matches!(column, Column::Input | Column::Output) { pen.fg } else { pen.dim };
+            pen.right(&text, false, *right, y, fill);
+        }
+    }
+}
+
 fn menu(pen: &mut Pen, view: &View, layout: &Layout, hover: Option<Hit>) {
     let (Some((frame, rows)), Some((selected, _))) = (&layout.menu, view.menu) else { return };
     pen.outline(*frame, color(pen.palette.chrome));
@@ -1046,7 +1236,7 @@ mod tests {
 
     #[test]
     fn controls_and_rows_are_where_clicks_find_them() {
-        let sizes = Sizes { days: 30, models: 40, agents: 3, workspace_chars: 14, menu: None };
+        let sizes = Sizes { days: 30, models: 40, agents: 3, workspace_chars: 14, ..Sizes::default() };
         let layout = Layout::new(WINDOW, CELL, 1.0, 40.0, sizes);
         let at = |rect: Rect| layout.hit(rect.center().0, rect.center().1);
         assert_eq!(at(layout.close), Some(Hit::Close));
@@ -1074,7 +1264,7 @@ mod tests {
 
     #[test]
     fn the_open_menu_takes_the_pointer_and_scrolls_to_its_highlight() {
-        let sizes = Sizes { days: 30, models: 2, agents: 2, workspace_chars: 14, menu: Some((40, 5)) };
+        let sizes = Sizes { days: 30, models: 2, agents: 2, workspace_chars: 14, menu: Some((40, 5)), ..Sizes::default() };
         let layout = Layout::new(WINDOW, CELL, 1.0, 40.0, sizes);
         let (frame, rows) = layout.menu.as_ref().unwrap();
         assert!(frame.y >= layout.workspace.y + layout.workspace.h);
@@ -1090,5 +1280,35 @@ mod tests {
         assert_eq!(menu_scroll(0, 5, 10), 0);
         assert_eq!(menu_scroll(7, 5, 10), 5);
         assert_eq!(menu_scroll(15, 5, 10), 6);
+    }
+
+    #[test]
+    fn the_task_list_is_below_the_first_screenful_and_scrolls_into_view() {
+        let sizes = Sizes { days: 30, models: 3, agents: 2, tasks: 25, workspace_chars: 14, ..Sizes::default() };
+        let layout = Layout::new(WINDOW, CELL, 1.0, 40.0, sizes);
+        // Its heading and first rows show at the bottom of the window.
+        let (heading, _) = layout.tasks;
+        assert!(heading.y + heading.h <= WINDOW.1);
+        assert!(layout.task_rows[0].y < WINDOW.1 && layout.task_rows[24].y > WINDOW.1);
+        assert_eq!(layout.task_rows.len(), 25);
+        assert!(layout.max_scroll() > 0.0);
+        // Scrolled all the way, its last row is in the window, and the
+        // header that went up under the title bar takes no clicks.
+        let most = layout.max_scroll();
+        let scrolled = Layout::new(WINDOW, CELL, 1.0, 40.0, Sizes { scroll: most + 500.0, ..sizes });
+        assert_eq!(scrolled.scroll(), most);
+        let last = scrolled.task_rows[24];
+        assert!(last.y + last.h <= WINDOW.1 && last.y + last.h > WINDOW.1 - 40.0);
+        assert!(scrolled.close.y < 40.0);
+        assert_eq!(scrolled.hit(scrolled.close.center().0, scrolled.close.center().1), None);
+        assert_eq!(scrolled.agent_rows[0].y, layout.agent_rows[0].y - most);
+    }
+
+    #[test]
+    fn narrow_task_lists_keep_the_tokens_and_the_time() {
+        let names = |cells: f32| task_columns(cells).into_iter().map(|(column, _)| column).collect::<Vec<_>>();
+        assert_eq!(names(80.0), [Column::Time, Column::Input, Column::Output]);
+        assert_eq!(names(110.0), [Column::Time, Column::Turns, Column::Subagents, Column::Input, Column::Output]);
+        assert_eq!(names(175.0).len(), 7);
     }
 }

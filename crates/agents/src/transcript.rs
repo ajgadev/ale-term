@@ -150,6 +150,30 @@ pub fn last_message(path: &Path) -> Option<String> {
     Some(clean(&lines.join(" "), 600))
 }
 
+/// The conversation's name: the one the user gave it, or else the one
+/// Claude Code made up, from the end of its record. Both are written again
+/// and again as the conversation goes on, so the end has the latest.
+pub fn title(path: &Path) -> Option<String> {
+    let text = read_tail(path)?;
+    let named = |line: &str, field: &str| {
+        let record = serde_json::from_str::<Value>(line).ok()?;
+        let name = clean(record.get(field)?.as_str()?, 120);
+        (!name.is_empty()).then_some(name)
+    };
+    let mut made_up = None;
+    for line in text.lines().rev() {
+        if line.contains("\"type\":\"custom-title\"")
+            && let Some(name) = named(line, "customTitle")
+        {
+            return Some(name);
+        }
+        if made_up.is_none() && line.contains("\"type\":\"ai-title\"") {
+            made_up = named(line, "aiTitle");
+        }
+    }
+    made_up
+}
+
 /// Size and modification time of a transcript, for noticing changes
 /// without rereading it.
 pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
@@ -161,6 +185,20 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_title_is_the_latest_name_given() {
+        let made_up = |name: &str| json!({ "type": "ai-title", "aiTitle": name, "sessionId": "a" });
+        let path = write("title", &[made_up("Fix the build"), json!({ "type": "user", "message": { "content": "hi" } }), made_up("Fix the  build\nand tests")]);
+        assert_eq!(title(&path).as_deref(), Some("Fix the build and tests"));
+        let renamed = write("renamed", &[json!({ "type": "custom-title", "customTitle": "Release", "sessionId": "a" }), made_up("Other")]);
+        assert_eq!(title(&renamed).as_deref(), Some("Release"));
+        let untitled = write("untitled", &[json!({ "type": "user", "message": { "content": "hi" } })]);
+        assert_eq!(title(&untitled), None);
+        for path in [path, renamed, untitled] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
     #[test]
     fn the_last_message_is_the_latest_run_of_text() {
