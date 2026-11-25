@@ -64,7 +64,11 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
                     let action = describe_tool(payload);
                     session.note_action(&action, now);
                     session.set_activity(action);
-                    session.set_state(AgentState::Working, now)
+                    // A question or a plan to approve waits for the user
+                    // in every permission mode, and no permission request
+                    // or notification says so.
+                    let state = if asks_the_user(payload) { AgentState::NeedsYou } else { AgentState::Working };
+                    session.set_state(state, now)
                 }
             }
         }
@@ -96,7 +100,8 @@ pub fn apply(session: &mut Session, event: &str, payload: &Value, now: Instant) 
             session.set_state(AgentState::Working, now)
         }
         "PermissionRequest" => {
-            session.set_activity(format!("Permission: {}", describe_tool(payload)));
+            let action = describe_tool(payload);
+            session.set_activity(if asks_the_user(payload) { action } else { format!("Permission: {action}") });
             session.set_state(AgentState::NeedsYou, now)
         }
         "Elicitation" => {
@@ -187,6 +192,12 @@ fn notification(session: &mut Session, payload: &Value, now: Instant) -> Change 
     }
 }
 
+/// Whether a tool call puts something to the user: Claude Code's
+/// multiple-choice questions, and a plan to approve.
+fn asks_the_user(payload: &Value) -> bool {
+    matches!(payload["tool_name"].as_str(), Some("AskUserQuestion" | "ExitPlanMode"))
+}
+
 /// A short description of a tool call, e.g. "Editing src/main.rs".
 fn describe_tool(payload: &Value) -> String {
     let tool = payload["tool_name"].as_str().unwrap_or("tool");
@@ -208,6 +219,16 @@ pub(crate) fn describe(tool: &str, input: &Value, cwd: Option<&str>) -> String {
         "WebSearch" => format!("Searching the web for {}", clean(field("query"), 60)),
         "Task" | "Agent" => format!("Delegating: {}", clean(field("description"), 80)),
         "TodoWrite" => "Updating the task list".into(),
+        "AskUserQuestion" => {
+            let questions = input["questions"].as_array().map_or(&[][..], Vec::as_slice);
+            let first = questions.iter().filter_map(|question| question["question"].as_str()).next();
+            match (first.map(|question| clean(question, 100)).filter(|question| !question.is_empty()), questions.len()) {
+                (Some(question), 0 | 1) => format!("Asks: {question}"),
+                (Some(question), count) => format!("Asks: {question} (+{} more)", count - 1),
+                (None, _) => "Has a question for you".into(),
+            }
+        }
+        "ExitPlanMode" => "Plan ready for your review".into(),
         other => format!("Using {}", clean(other, 40)),
     }
 }
@@ -337,6 +358,35 @@ mod tests {
         let (mut s, now) = session();
         let payload = json!({ "hook_event_name": "UserPromptSubmit", "prompt": "hi" });
         assert_eq!(apply(&mut s, "", &payload, now), Change::State(AgentState::Working));
+    }
+
+    #[test]
+    fn questions_and_plans_need_the_user_in_any_permission_mode() {
+        let (mut s, now) = session();
+        apply(&mut s, "UserPromptSubmit", &json!({ "prompt": "set it up" }), now);
+        let question = |count: usize| {
+            let one = json!({ "question": "Which  database?", "header": "DB", "options": [], "multiSelect": false });
+            json!({ "tool_name": "AskUserQuestion", "tool_input": { "questions": vec![one; count] } })
+        };
+        assert_eq!(apply(&mut s, "PreToolUse", &question(1), now), Change::State(AgentState::NeedsYou));
+        assert_eq!(s.activity.as_deref(), Some("Asks: Which database?"));
+        // Where a permission request follows, it says the same.
+        assert_eq!(apply(&mut s, "PermissionRequest", &question(1), now), Change::Updated);
+        assert_eq!(s.activity.as_deref(), Some("Asks: Which database?"));
+        // Answered.
+        assert_eq!(apply(&mut s, "PostToolUse", &question(1), now), Change::State(AgentState::Working));
+        apply(&mut s, "PreToolUse", &question(3), now);
+        assert_eq!(s.activity.as_deref(), Some("Asks: Which database? (+2 more)"));
+        apply(&mut s, "PostToolUse", &question(3), now);
+
+        let plan = json!({ "tool_name": "ExitPlanMode", "tool_input": { "plan": "1. Do it" } });
+        assert_eq!(apply(&mut s, "PreToolUse", &plan, now), Change::State(AgentState::NeedsYou));
+        assert_eq!(s.activity.as_deref(), Some("Plan ready for your review"));
+        // A subagent's tool calls leave the agent's state alone.
+        apply(&mut s, "PostToolUse", &plan, now);
+        let inner = json!({ "tool_name": "AskUserQuestion", "agent_id": "sub-1", "tool_input": {} });
+        apply(&mut s, "PreToolUse", &inner, now);
+        assert_eq!(s.state, AgentState::Working);
     }
 
     #[test]
