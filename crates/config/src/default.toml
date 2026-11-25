@@ -21,7 +21,9 @@ restore = true
 renderer = "cpu"
 
 [terminal]
-scrollback = 10000
+# Lines of history kept per pane. Each costs memory across the whole
+# window width, so a wide pane with full history can use tens of MB.
+scrollback = 5000
 # shell = "/bin/zsh"
 # shell_args = ["-l"]
 # Send ESC + key for Option combinations instead of composing characters.

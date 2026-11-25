@@ -168,7 +168,7 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            scrollback: 10_000,
+            scrollback: 5_000,
             shell: None,
             shell_args: Vec::new(),
             option_as_meta: false,
@@ -501,8 +501,8 @@ mod tests {
         // New keys and new sections are added.
         let updated = set_in_text(original, "font", "ligatures", &SettingValue::Bool(false)).unwrap();
         assert!(!Config::parse(&updated).unwrap().font.ligatures);
-        let updated = set_in_text(original, "terminal", "scrollback", &SettingValue::Integer(5000)).unwrap();
-        assert_eq!(Config::parse(&updated).unwrap().terminal.scrollback, 5000);
+        let updated = set_in_text(original, "terminal", "scrollback", &SettingValue::Integer(20_000)).unwrap();
+        assert_eq!(Config::parse(&updated).unwrap().terminal.scrollback, 20_000);
         assert!(updated.starts_with("# My settings.\n"));
 
         // An empty file works; a broken one is reported, not rewritten.
