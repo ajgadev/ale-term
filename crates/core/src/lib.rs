@@ -23,9 +23,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::cell::Cell;
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::Rgb;
 
@@ -265,6 +266,36 @@ impl Terminal {
 
     pub fn size(&self) -> GridSize {
         *self.shared.size.lock().unwrap()
+    }
+
+    /// How many lines of history the session holds and how many bytes each
+    /// takes, or `None` while a full-screen program has the screen: the
+    /// history is put aside then, and cannot change.
+    pub fn history(&self) -> Option<(usize, usize)> {
+        let term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        // Every line holds a cell per column, written on or not.
+        let line_bytes = term.columns() * std::mem::size_of::<Cell>() + std::mem::size_of::<Row<Cell>>();
+        Some((term.grid().history_size(), line_bytes))
+    }
+
+    /// Keeps at most `lines` lines of history from now on, dropping the
+    /// oldest beyond that. With `pack`, also frees the lines kept ready for
+    /// history still to come (up to a thousand of them); worth doing once a
+    /// session has gone quiet. Does nothing while a full-screen program has
+    /// the screen.
+    pub fn limit_history(&self, lines: usize, pack: bool) {
+        let mut term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let grid = term.grid_mut();
+        grid.update_history(lines);
+        if pack {
+            grid.truncate();
+        }
     }
 
     /// Resizes both the emulator grid and the PTY (which notifies the shell).

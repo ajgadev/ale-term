@@ -188,6 +188,18 @@ impl Renderer {
         each!(self, r => r.image(key, x, y, width, height, uv))
     }
 
+    /// Frees memory that is only needed while frames are being shown, to
+    /// be called once the window has been still for a moment. With
+    /// `hidden`, the window cannot be seen at all and the picture on
+    /// screen is freed too. The next frame gets back whatever it needs, at
+    /// the cost of painting the whole window once. (CPU renderer only; the
+    /// GPU renderer's memory is the graphics driver's to manage.)
+    pub fn release_idle(&mut self, hidden: bool) {
+        if let Renderer::Cpu(r) = self {
+            r.release_idle(hidden);
+        }
+    }
+
     /// Shows the frame in the window.
     ///
     /// Returns `true` when the frame should be described and presented

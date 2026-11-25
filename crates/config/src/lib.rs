@@ -148,8 +148,11 @@ impl Default for WindowConfig {
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TerminalConfig {
-    /// Lines of history kept per pane.
+    /// The most lines of history a pane keeps.
     pub scrollback: usize,
+    /// Memory all panes' history may take together, in megabytes; 0 for
+    /// no limit.
+    pub scrollback_memory_mb: u32,
     /// Program to run instead of the login shell.
     pub shell: Option<String>,
     pub shell_args: Vec<String>,
@@ -169,6 +172,7 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             scrollback: 5_000,
+            scrollback_memory_mb: 16,
             shell: None,
             shell_args: Vec::new(),
             option_as_meta: false,

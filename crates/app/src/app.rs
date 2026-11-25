@@ -48,6 +48,7 @@ use crate::Options;
 use crate::actions::{self, Action};
 use crate::links::{self, Target};
 use crate::overlay::{self, InputKind, ListKind, Overlay, PaletteLayout};
+use crate::scrollback;
 use crate::workspace::{self, Approvals, TabId, Workspace, WorkspaceId};
 use workspaces::Choice;
 use crate::chrome::{TabBar, TabBarHit};
@@ -94,6 +95,14 @@ struct Pane {
     agent: Option<ale_agents::Session>,
     /// What of that agent's work has been written to the usage journal.
     activity: usage_panel::Activity,
+    /// The history it held when last looked at.
+    history: Option<scrollback::Held>,
+    /// How many lines of history it may hold.
+    history_limit: usize,
+    /// It has had output since its history was last looked at.
+    output: bool,
+    /// The lines kept ready for more history have been freed since.
+    packed: bool,
 }
 
 struct Tab {
@@ -184,6 +193,14 @@ struct HoverLink {
 /// The shortest time between two frames: 120 frames a second at most.
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
+/// How long the window stays still (or out of sight) before the memory
+/// kept for drawing its next frame is freed.
+const DRAWING_IDLE: Duration = Duration::from_secs(2);
+
+/// How often, while there is output, the panes' history is measured and
+/// its memory budget shared out again.
+const SCROLLBACK_CHECK: Duration = Duration::from_secs(1);
+
 pub struct App {
     options: Options,
     proxy: EventLoopProxy<UserEvent>,
@@ -239,6 +256,14 @@ pub struct App {
     /// When the last frame was drawn, and when a postponed one is due.
     last_frame: Instant,
     frame_due: Option<Instant>,
+    /// The window cannot be seen (covered, minimized, on another desktop),
+    /// so nothing is drawn.
+    hidden: bool,
+    /// When to free the memory kept for drawing, unless a frame is drawn
+    /// first.
+    release_at: Option<Instant>,
+    /// When to next hold the panes' history to its memory budget.
+    scrollback_at: Option<Instant>,
 
     modifiers: ModifiersState,
     mouse: Mouse,
@@ -323,6 +348,9 @@ impl App {
             spinner_shown: 0,
             last_frame: Instant::now() - FRAME_INTERVAL,
             frame_due: None,
+            hidden: false,
+            release_at: None,
+            scrollback_at: None,
             modifiers: ModifiersState::empty(),
             mouse: Mouse {
                 x: 0.0,
@@ -526,6 +554,7 @@ impl App {
             let _ = proxy.send_event(UserEvent::Term(id, event));
         });
         let terminal = &self.config.terminal;
+        let most_history = terminal.scrollback;
         let options = SpawnOptions {
             shell: terminal.shell.clone().map(|shell| (shell, terminal.shell_args.clone())),
             working_directory: working_directory
@@ -549,8 +578,14 @@ impl App {
                     created: Instant::now(),
                     agent: None,
                     activity: usage_panel::Activity::default(),
+                    history: None,
+                    history_limit: most_history,
+                    output: false,
+                    packed: false,
                 };
                 self.panes.insert(id, pane);
+                // Its share of the history budget, before it has output.
+                self.scrollback_at = Some(Instant::now());
                 Some(id)
             }
             Err(e) => {
@@ -785,6 +820,59 @@ impl App {
 
     /// Re-reads the config file. A file with errors is ignored so a typo
     /// mid-edit never breaks the running terminal.
+    /// Tells each pane how much history it may hold, so that together
+    /// they stay within the memory budget (see [`scrollback`]), and frees
+    /// the lines quiet panes keep ready for more. Returns whether any pane
+    /// has had output since the last look.
+    fn limit_scrollback(&mut self) -> bool {
+        let budget = self.config.terminal.scrollback_memory_mb as usize * 1024 * 1024;
+        let most = self.config.terminal.scrollback;
+        // A pane showing a full-screen program cannot be measured or cut;
+        // its history is as it was when last seen.
+        let mut seen = Vec::new();
+        let mut held = Vec::new();
+        for (id, pane) in &mut self.panes {
+            let output = std::mem::take(&mut pane.output);
+            let now = pane.terminal.history();
+            if let Some((lines, line_bytes)) = now {
+                // Growing, or stopped from it by its limit.
+                let before = pane.history.map_or(0, |history| history.lines);
+                let growing = output && (lines > before || lines >= pane.history_limit);
+                pane.history = Some(scrollback::Held { lines, line_bytes, growing });
+            }
+            if let Some(history) = pane.history {
+                seen.push((*id, now.is_some(), output));
+                held.push(history);
+            }
+        }
+        let limits = match budget {
+            0 => vec![most; held.len()],
+            _ => scrollback::limits(&held, budget, most),
+        };
+        let mut cut = false;
+        for (((id, reachable, output), held), limit) in seen.iter().zip(&held).zip(limits) {
+            let Some(pane) = self.panes.get_mut(id).filter(|_| *reachable) else { continue };
+            // A pane cut to its limit is full, and one without output is
+            // quiet: neither needs lines kept ready.
+            let over = held.lines > limit;
+            let pack = over || !(*output || pane.packed);
+            if limit != pane.history_limit || pack {
+                pane.terminal.limit_history(limit, pack);
+                pane.history_limit = limit;
+            }
+            pane.packed = pack || (pane.packed && !*output);
+            if over {
+                pane.history = Some(scrollback::Held { lines: limit, ..*held });
+                cut = true;
+            }
+        }
+        // A pane scrolled back to lines that are gone now shows others.
+        if cut {
+            self.redraw();
+        }
+        seen.iter().any(|(_, _, output)| *output)
+    }
+
     fn reload_config(&mut self) {
         match ale_config::reload() {
             Ok(config) if config != self.config => {
@@ -792,6 +880,7 @@ impl App {
                 self.apply_theme();
                 self.apply_font();
                 self.apply_option_key();
+                self.scrollback_at = Some(Instant::now());
             }
             Ok(_) => {}
             Err(error) => {
@@ -981,6 +1070,10 @@ impl App {
     fn term_event(&mut self, id: PaneId, event: TermEvent) {
         match event {
             TermEvent::Wakeup => {
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.output = true;
+                }
+                self.scrollback_at.get_or_insert(Instant::now() + SCROLLBACK_CHECK);
                 self.agent_output(id);
                 self.redraw();
             }
@@ -1159,6 +1252,17 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Nobody would see it. What changed meanwhile is drawn when
+            // the window comes back.
+            WindowEvent::RedrawRequested if self.hidden => self.frame_due = None,
+            WindowEvent::Occluded(hidden) => {
+                self.hidden = hidden;
+                if hidden {
+                    self.release_at = Some(Instant::now() + DRAWING_IDLE);
+                } else {
+                    self.redraw();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 // Pace frames: during a burst of output, redraw requests
                 // arrive far faster than a screen can show. Drawing each
@@ -1183,6 +1287,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ThemeChanged(_) => self.apply_theme(),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // A window being typed into can be seen, whatever we were
+                // told before.
+                self.hidden &= !focused;
                 // Programs told about focus changes repaint.
                 let now = Instant::now();
                 for session in self.panes.values_mut().filter_map(|pane| pane.agent.as_mut()) {
@@ -1261,6 +1368,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.frame_due = None;
                 self.redraw();
             } else {
+                wake_at(at);
+            }
+        }
+        // Free what drawing needed, now that the window has been still.
+        if let Some(at) = self.release_at {
+            if Instant::now() >= at {
+                self.release_at = None;
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.release_idle(self.hidden);
+                }
+            } else {
+                wake_at(at);
+            }
+        }
+        if let Some(at) = self.scrollback_at {
+            if Instant::now() >= at {
+                // Look again while the history is still growing.
+                self.scrollback_at = self.limit_scrollback().then(|| Instant::now() + SCROLLBACK_CHECK);
+            }
+            if let Some(at) = self.scrollback_at {
                 wake_at(at);
             }
         }

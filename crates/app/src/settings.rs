@@ -47,7 +47,8 @@ pub const SETTINGS: &[Setting] = &[
     Setting { section: "font", key: "line_height", group: "Appearance", label: "Line height", kind: number(0.05, 0.8, 3.0), help: "As a multiple of the font size." },
     Setting { section: "font", key: "ligatures", group: "Appearance", label: "Ligatures", kind: Kind::Toggle, help: "Join pairs such as -> and != when the font supports it." },
     Setting { section: "window", key: "padding", group: "Appearance", label: "Padding", kind: number(1.0, 0.0, 64.0), help: "Space between a pane's edge and its text, in points." },
-    Setting { section: "terminal", key: "scrollback", group: "Terminal", label: "Scrollback lines", kind: whole(1000.0, 0.0, 1_000_000.0), help: "Lines of history kept per pane. Applies to new panes." },
+    Setting { section: "terminal", key: "scrollback", group: "Terminal", label: "Scrollback lines", kind: whole(1000.0, 0.0, 1_000_000.0), help: "The most lines of history a pane keeps." },
+    Setting { section: "terminal", key: "scrollback_memory_mb", group: "Terminal", label: "Scrollback memory (MB)", kind: whole(8.0, 0.0, 4096.0), help: "Shared by all panes; the fullest lose their oldest lines beyond it. 0 for no limit." },
     Setting { section: "terminal", key: "scroll_multiplier", group: "Terminal", label: "Scroll speed", kind: number(0.5, 0.5, 20.0), help: "Lines scrolled per mouse-wheel notch." },
     Setting { section: "terminal", key: "option_as_meta", group: "Terminal", label: "Option as Meta", kind: Kind::Toggle, help: "Send ESC + key instead of composing characters with Option." },
     Setting { section: "terminal", key: "shell_integration", group: "Terminal", label: "Shell integration", kind: Kind::Toggle, help: "Let zsh report its folder, prompts and commands. Applies to new panes." },
@@ -94,6 +95,7 @@ pub fn current(config: &Config, setting: &Setting) -> SettingValue {
             .into(),
         ),
         ("terminal", "scrollback") => Integer(config.terminal.scrollback as i64),
+        ("terminal", "scrollback_memory_mb") => Integer(config.terminal.scrollback_memory_mb as i64),
         ("terminal", "scroll_multiplier") => Float(config.terminal.scroll_multiplier as f64),
         ("terminal", "option_as_meta") => Bool(config.terminal.option_as_meta),
         ("terminal", "shell_integration") => Bool(config.terminal.shell_integration),
@@ -366,8 +368,8 @@ mod tests {
             assert!(rect.y + rect.h <= layout.footer.y + 0.5);
             assert!(layout.frame.y + layout.frame.h <= 420.0);
         }
-        // Headings are not settings.
-        let layout = ScreenLayout::new((1000.0, 900.0), cell, 1.0, 0);
+        // Headings are not settings. (A window tall enough for every line.)
+        let layout = ScreenLayout::new((1000.0, 1200.0), cell, 1.0, 0);
         let (heading, _) = layout.rows[0];
         assert_eq!(layout.rows[0].1, Line::Heading("Appearance"));
         assert_eq!(layout.setting_at(heading.x + 5.0, heading.y + 5.0), None);

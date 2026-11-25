@@ -372,6 +372,7 @@ impl App {
     pub(super) fn draw(&mut self) {
         self.build_frame();
         let again = self.renderer.as_mut().is_some_and(|r| r.present());
+        self.release_at = Some(Instant::now() + DRAWING_IDLE);
         if !self.first_frame_logged {
             self.first_frame_logged = true;
             log::info!("first frame {:?} after launch", self.launched.elapsed());

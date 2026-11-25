@@ -21,9 +21,13 @@ restore = true
 renderer = "cpu"
 
 [terminal]
-# Lines of history kept per pane. Each costs memory across the whole
-# window width, so a wide pane with full history can use tens of MB.
+# The most lines of history a pane keeps. Each costs memory across the
+# whole width of the pane, so a wide pane with 5000 can use over 20 MB.
 scrollback = 5000
+# Memory the history of all panes may use together, in megabytes. When
+# they hold more, the panes holding the most lose their oldest lines.
+# 0 lets every pane keep its full `scrollback`.
+scrollback_memory_mb = 16
 # shell = "/bin/zsh"
 # shell_args = ["-l"]
 # Send ESC + key for Option combinations instead of composing characters.

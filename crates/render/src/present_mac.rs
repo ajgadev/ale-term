@@ -9,6 +9,11 @@
 //! never shown a surface that is being painted. Each remembers which band
 //! contents it holds, since a surface that sat out a frame is one frame
 //! behind.
+//!
+//! A surface is as large as the window's picture (tens of megabytes on a
+//! large screen), so they are not kept longer than needed: the one that is
+//! not on screen can be let go while nothing changes, and both while the
+//! window cannot be seen. They are made again when next painted.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -41,7 +46,8 @@ pub struct Presenter {
     layer: Retained<CALayer>,
     /// The view's layer; we copy its size and scale.
     root: Retained<CALayer>,
-    buffers: Vec<Buffer>,
+    /// The two surfaces; either may be missing until it is next painted.
+    buffers: [Option<Buffer>; 2],
     /// Which buffer is on screen.
     shown: Option<usize>,
     /// Which buffer is locked for painting.
@@ -119,7 +125,7 @@ impl Presenter {
         Ok(Presenter {
             layer,
             root,
-            buffers: Vec::new(),
+            buffers: [None, None],
             shown: None,
             painting: None,
             width: 0,
@@ -136,7 +142,7 @@ impl Presenter {
         self.height = height;
         self.bands = bands;
         // New surfaces are created lazily, and start with nothing painted.
-        self.buffers.clear();
+        self.buffers = [None, None];
         self.shown = None;
         self.painting = None;
         let scale = self.root.contentsScale().max(1.0);
@@ -150,13 +156,13 @@ impl Presenter {
     /// What each band of the picture on screen shows, or `None` if nothing
     /// has been shown at this size yet.
     pub fn shown(&self) -> Option<&[u64]> {
-        self.shown.map(|index| self.buffers[index].painted.as_slice())
+        self.buffers[self.shown?].as_ref().map(|buffer| buffer.painted.as_slice())
     }
 
     /// Copies out the picture currently on screen, with its row length in
     /// pixels. For checking that what is shown matches what was asked for.
     pub fn read_shown(&self) -> Option<(Vec<u32>, usize)> {
-        let buffer = &self.buffers[self.shown?];
+        let buffer = self.buffers[self.shown?].as_ref()?;
         let read_only = IOSurfaceLockOptions::ReadOnly;
         // SAFETY: a read-only lock keeps the memory mapped and stable for
         // the duration of the copy; the length matches the surface.
@@ -178,12 +184,12 @@ impl Presenter {
             Some(0) => 1,
             _ => 0,
         };
-        while self.buffers.len() <= index {
+        if self.buffers[index].is_none() {
             let surface = create_surface(self.width, self.height)?;
             let stride = surface.bytes_per_row() / 4;
-            self.buffers.push(Buffer { surface, stride, painted: vec![0; self.bands] });
+            self.buffers[index] = Some(Buffer { surface, stride, painted: vec![0; self.bands] });
         }
-        let buffer = &mut self.buffers[index];
+        let buffer = self.buffers[index].as_mut()?;
         // SAFETY: locking gives this process exclusive access to the
         // surface's memory until the matching unlock in `finish`.
         let status = unsafe { buffer.surface.lock(IOSurfaceLockOptions(0), std::ptr::null_mut()) };
@@ -205,7 +211,8 @@ impl Presenter {
     /// Puts the surface handed out by `begin` on screen.
     pub fn finish(&mut self) {
         let Some(index) = self.painting.take() else { return };
-        let surface = &self.buffers[index].surface;
+        let Some(buffer) = &self.buffers[index] else { return };
+        let surface = &buffer.surface;
         // SAFETY: matches the lock in `begin`.
         unsafe { surface.unlock(IOSurfaceLockOptions(0), std::ptr::null_mut()) };
         without_animation(|| {
@@ -216,5 +223,28 @@ impl Presenter {
             }
         });
         self.shown = Some(index);
+    }
+
+    /// Lets go of the surface that is not on screen. The next frame makes
+    /// a new one and paints all of it.
+    pub fn trim(&mut self) {
+        for (index, buffer) in self.buffers.iter_mut().enumerate() {
+            if Some(index) != self.shown && Some(index) != self.painting {
+                *buffer = None;
+            }
+        }
+    }
+
+    /// Lets go of both surfaces, for a window that cannot be seen. The
+    /// layer shows nothing until the next frame.
+    pub fn release(&mut self) {
+        if self.painting.is_some() {
+            return;
+        }
+        // The layer holds on to the surface it shows.
+        // SAFETY: a layer may have no contents.
+        without_animation(|| unsafe { self.layer.setContents(None) });
+        self.buffers = [None, None];
+        self.shown = None;
     }
 }

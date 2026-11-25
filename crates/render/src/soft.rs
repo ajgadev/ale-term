@@ -405,6 +405,16 @@ impl SoftRenderer {
         false
     }
 
+    /// Frees the memory held for painting the next frame (`hidden`: and
+    /// for the frame on screen, as the window cannot be seen).
+    pub fn release_idle(&mut self, hidden: bool) {
+        if hidden {
+            self.presenter.release();
+        } else {
+            self.presenter.trim();
+        }
+    }
+
     /// Returns what is on screen right now, as RGBA pixels with its width
     /// and height. Unlike [`SoftRenderer::capture`], which paints a fresh
     /// picture, this reads back the surface the window is showing, so it

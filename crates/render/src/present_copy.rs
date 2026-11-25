@@ -61,4 +61,11 @@ impl Presenter {
             Err(e) => log::warn!("cannot get a buffer to show the frame in: {e}"),
         }
     }
+
+    /// There is one picture here, and it is the one on screen.
+    pub fn trim(&mut self) {}
+
+    /// The picture is kept: a window system may show it again without
+    /// asking us to repaint.
+    pub fn release(&mut self) {}
 }

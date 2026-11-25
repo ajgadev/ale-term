@@ -25,6 +25,7 @@ mod menu;
 mod overlay;
 mod settings;
 mod preview;
+mod scrollback;
 mod sidebar;
 mod start;
 mod summary;
